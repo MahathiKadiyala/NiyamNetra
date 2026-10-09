@@ -180,7 +180,7 @@ export default function MoreScreen({ navigation }) {
           </View>
         </Pressable>
         <Text style={{ ...typography.caption, textAlign: 'center', marginTop: spacing.xxl }}>
-          {ruleInfo?.name ? `${ruleInfo.name} • 19 Checks` : t.footer}
+          {ruleInfo?.name ? `${ruleInfo.name} • ${ruleInfo?.total_checks || ruleInfo?.checks_registered || 26} Statutory Checks` : t.footer}
         </Text>
       </ScrollView>
     </View>

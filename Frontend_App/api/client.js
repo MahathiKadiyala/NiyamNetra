@@ -3,6 +3,7 @@ import { ACTIVE_BACKEND, API_BASE_URL, BACKEND_TARGETS, getCustomUrl, loadCustom
 
 let accessToken = null;
 export const setAccessToken = (t) => { accessToken = t; };
+export const getAccessToken = () => accessToken;
 
 // Session-death broadcast. The response interceptor cannot import AuthContext
 // (circular import), so it emits here and AuthContext subscribes on mount to

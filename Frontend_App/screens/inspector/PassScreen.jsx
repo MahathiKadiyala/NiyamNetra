@@ -130,7 +130,7 @@ export default function PassScreen({ navigation }) {
                         <Text style={{ fontSize: 15, fontWeight: '600', color: colors.text, marginBottom: 4 }}>
                           {item.store_name || item.store || 'Unknown store'}
                         </Text>
-                        <Text style={{ fontSize: 12, color: colors.textMuted }}>{itemDate(item)} • {checks ? `${checks} assessed` : '19 checks (CHK01–CHK18 + CHK06b)'}</Text>
+                        <Text style={{ fontSize: 12, color: colors.textMuted }}>{itemDate(item)} • {checks ? `${checks} assessed` : 'Statutory checks assessed'}</Text>
                         <View style={{ flexDirection: 'row', marginTop: spacing.sm }}>
                           <View style={{ backgroundColor: colors.pass.fill, borderRadius: radius.sm, paddingHorizontal: 8, paddingVertical: 2, marginRight: spacing.xs }}>
                             <Text style={{ color: colors.pass.text, fontSize: 11, fontWeight: '600' }}>✓ {passed} compliant</Text>

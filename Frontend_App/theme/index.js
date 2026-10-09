@@ -105,32 +105,34 @@ export const shadows = {
   },
 };
 
-// Canonical rule results: Compliant, Violation, Not Assessed, Out of Scope
 export const scanResultConfig = {
-  compliant: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  violation: { label: 'Violation', ...colors.violation, icon: '✗' },
-  not_assessed: { label: 'Not Assessed', ...colors.notAssessed, icon: '—' },
-  out_of_scope: { label: 'Out of Scope', ...colors.info, icon: '○' },
+  compliant: { label: 'COMPLIANT', ...colors.pass, icon: '✓' },
+  violation: { label: 'VIOLATION', ...colors.violation, icon: '✗' },
+  not_assessed: { label: 'NOT ASSESSED', ...colors.notAssessed, icon: '—' },
+  out_of_scope: { label: 'OUT OF SCOPE', ...colors.info, icon: '○' },
+  review_required: { label: 'REVIEW REQUIRED', ...colors.review, icon: '!' },
+  not_applicable: { label: 'NOT APPLICABLE', ...colors.info, icon: '○' },
   // Aliases for legacy/back-compat payloads
-  success: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  pass: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  fail: { label: 'Violation', ...colors.violation, icon: '✗' },
-  non_compliant: { label: 'Violation', ...colors.violation, icon: '✗' },
-  refused: { label: 'Refused', fill: '#FFFBEB', border: '#FDE68A', text: '#B45309', icon: '🚫' },
+  success: { label: 'COMPLIANT', ...colors.pass, icon: '✓' },
+  pass: { label: 'COMPLIANT', ...colors.pass, icon: '✓' },
+  fail: { label: 'VIOLATION', ...colors.violation, icon: '✗' },
+  non_compliant: { label: 'VIOLATION', ...colors.violation, icon: '✗' },
+  refused: { label: 'REFUSED', fill: '#FFFBEB', border: '#FDE68A', text: '#B45309', icon: '🚫' },
 };
 
-// Check finding verdict configs
+// Check finding verdict configs (PASS, FAIL, NOT ASSESSED at finding level)
 export const verdictConfig = {
-  compliant: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  pass: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  violation: { label: 'Violation', ...colors.violation, icon: '✗' },
-  fail: { label: 'Violation', ...colors.violation, icon: '✗' },
-  non_compliant: { label: 'Violation', ...colors.violation, icon: '✗' },
-  not_assessed: { label: 'Not Assessed', ...colors.notAssessed, icon: '—' },
-  out_of_scope: { label: 'Out of Scope', ...colors.info, icon: '○' },
-  success: { label: 'Compliant', ...colors.pass, icon: '✓' },
-  review: { label: 'Review', ...colors.review, icon: '!' },
-  refused: { label: 'Refused', fill: '#FFFBEB', border: '#FDE68A', text: '#B45309', icon: '🚫' },
+  compliant: { label: 'PASS', ...colors.pass, icon: '✓' },
+  pass: { label: 'PASS', ...colors.pass, icon: '✓' },
+  violation: { label: 'FAIL', ...colors.violation, icon: '✗' },
+  fail: { label: 'FAIL', ...colors.violation, icon: '✗' },
+  non_compliant: { label: 'FAIL', ...colors.violation, icon: '✗' },
+  not_assessed: { label: 'NOT ASSESSED', ...colors.notAssessed, icon: '—' },
+  not_applicable: { label: 'NOT APPLICABLE', ...colors.info, icon: '○' },
+  out_of_scope: { label: 'NOT APPLICABLE', ...colors.info, icon: '○' },
+  success: { label: 'PASS', ...colors.pass, icon: '✓' },
+  review: { label: 'REVIEW', ...colors.review, icon: '!' },
+  refused: { label: 'REFUSED', fill: '#FFFBEB', border: '#FDE68A', text: '#B45309', icon: '🚫' },
 };
 
 // Inspection & Sync Status configs

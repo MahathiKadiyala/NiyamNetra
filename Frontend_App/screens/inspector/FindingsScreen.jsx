@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -19,9 +19,10 @@ import VerdictBadge from '../../components/VerdictBadge';
 import PrimaryButton from '../../components/PrimaryButton';
 import { overrideFinding, assessScan, fetchScanDetails, verifyEvidence, fetchRuleInfo } from '../../api/inspections';
 import { API_BASE_URL } from '../../api/config';
+import { getAccessToken } from '../../api/client';
 
 // The 26 authoritative statutory checks under active rule pack 2026.09.v1
-const STATUTORY_CHECKS_MASTER = [
+export const STATUTORY_CHECKS_MASTER = [
   {
     code: 'CHK01',
     name: 'Mandatory Declarations on Retail Pre-Packaged Commodity',
@@ -232,60 +233,72 @@ const STATUTORY_CHECKS_MASTER = [
   },
 ];
 
+export function formatFinding(f, idx = 0) {
+  if (!f) return null;
+  const srvId = typeof f.id === 'number' && f.id > 0 ? f.id : (typeof f.server_id === 'number' && f.server_id > 0 ? f.server_id : null);
+  const checkId = f.check_id || f.code || f.rule_id || `CHK${String(idx + 1).padStart(2, '0')}`;
+  const effective = f.effective_verdict || f.human_verdict || f.engine_verdict || f.verdict || f.finding_status || 'not_assessed';
+  const engine = f.engine_verdict || f.verdict || 'not_assessed';
+  const isFail = effective === 'fail' || effective === 'violation';
+
+  return {
+    id: f.id || idx + 1,
+    server_id: srvId,
+    check_id: checkId,
+    rule_id: f.rule_id || checkId,
+    title: f.title || f.name || f.rule_title || checkId,
+    citation: f.citation || f.statutory_reference || f.source_rule || 'Legal Metrology (Packaged Commodities) Rules, 2011',
+    engine_verdict: engine,
+    effective_verdict: effective,
+    human_verdict: f.human_verdict || null,
+    override_reason: f.override_reason || null,
+    observed: f.observed || 'No declaration observed on packaging',
+    required: f.required || 'Statutory declaration required under Legal Metrology Rules',
+    severity: f.severity || 'critical',
+    reason: f.reason || f.explanation || null,
+    remediation: f.remediation || (isFail ? 'Rectify packaging declaration to comply with statutory rule requirements' : null),
+    confidence: f.confidence,
+    evidence_references: f.evidence_references || (f.check_id ? [f.check_id] : []),
+  };
+}
+
+export function formatFindings(rawFindings) {
+  if (!Array.isArray(rawFindings) || rawFindings.length === 0) {
+    return [];
+  }
+  return rawFindings.map((f, idx) => formatFinding(f, idx)).filter(Boolean);
+}
+
+export function buildInitialFindings(scan) {
+  if (Array.isArray(scan?.findings) && scan.findings.length > 0) {
+    return formatFindings(scan.findings);
+  }
+  const hasSticker = scan?.has_sticker;
+  return STATUTORY_CHECKS_MASTER.map((m, idx) => ({
+    id: idx + 1,
+    server_id: null,
+    check_id: m.code,
+    rule_id: m.code,
+    title: m.name,
+    citation: m.citation,
+    engine_verdict: 'not_assessed',
+    effective_verdict: 'not_assessed',
+    human_verdict: null,
+    observed: m.code === 'CHK11' && hasSticker ? 'Sticker found affixed over package' : m.defaultObserved,
+    required: m.required,
+    severity: m.severity,
+    reason: m.code === 'CHK11' && hasSticker ? 'Sticker declared on package — pending server assessment.' : 'Pending server assessment.',
+    remediation: null,
+    evidence_references: [m.code],
+  }));
+}
+
 export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const insets = useSafeAreaInsets();
   const safeBottom = Math.max(insets.bottom || 0, 24);
 
-  const [findings, setFindings] = useState(() => {
-    // If scan has real findings from server or offline assessment, use them!
-    if (Array.isArray(scan?.findings) && scan.findings.length > 0) {
-      return scan.findings.map((f, idx) => ({
-        id: f.id || idx + 1,
-        server_id: typeof f.id === 'number' && f.id > 0 ? f.id : null,
-        check_id: f.check_id || f.code,
-        title: f.title || f.name,
-        citation: f.citation || '',
-        engine_verdict: f.engine_verdict || f.verdict || 'not_assessed',
-        effective_verdict: f.effective_verdict || f.human_verdict || f.engine_verdict || f.verdict || 'not_assessed',
-        human_verdict: f.human_verdict || null,
-        override_reason: f.override_reason || null,
-        observed: f.observed || 'Pending observation',
-        required: f.required || '',
-        severity: f.severity || 'critical',
-        reason: f.reason || null,
-        confidence: f.confidence,
-      }));
-    }
-
-    const hasSticker = scan?.has_sticker;
-    return STATUTORY_CHECKS_MASTER.map((m, idx) => {
-      let engineVerdict = 'not_assessed';
-      let reason = null;
-
-      if (m.code === 'CHK13' && hasSticker) {
-        // Suspicion is an observation, never a verdict: the server is the
-        // assessor (05 §1.1). Seeding 'fail' here used to roll the scan up
-        // to a local 'violation' before any server assessment existed.
-        engineVerdict = 'not_assessed';
-        reason = 'Sticker suspected over the original MRP — pending server assessment.';
-      }
-
-      return {
-        id: idx + 1,
-        server_id: null,
-        check_id: m.code,
-        title: m.name,
-        citation: m.citation,
-        engine_verdict: engineVerdict,
-        effective_verdict: engineVerdict,
-        human_verdict: null,
-        observed: m.code === 'CHK13' && hasSticker ? 'Sticker found covering original price' : m.defaultObserved,
-        required: m.required,
-        severity: m.severity,
-        reason,
-      };
-    });
-  });
+  const [currentScan, setCurrentScan] = useState(scan);
+  const [findings, setFindings] = useState(() => buildInitialFindings(scan));
 
   // Override modal state
   const [selectedFinding, setSelectedFinding] = useState(null);
@@ -298,29 +311,80 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const [selectedImage, setSelectedImage] = useState(null);
   const reassessBusyRef = useRef(false);
 
-  const scanId = scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
+  // Sync state when scan prop changes
+  useEffect(() => {
+    setCurrentScan(scan);
+    setFindings(buildInitialFindings(scan));
+    setEvidenceIntegrity(null);
+    setSelectedFinding(null);
+    setSelectedImage(null);
+  }, [scan?.id, scan?.server_id]);
 
-  const evidenceImages = React.useMemo(() => {
+  const scanId = currentScan?.server_id || (typeof currentScan?.id === 'number' && currentScan.id > 0 ? currentScan.id : null) || scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
+
+  const evidenceImages = useMemo(() => {
     const list = [];
-    if (Array.isArray(scan?.images) && scan.images.length > 0) {
-      scan.images.forEach((img, i) => {
+    const sourceImages = currentScan?.images || scan?.images;
+    const token = getAccessToken();
+
+    const buildAuthUrl = (u) => {
+      if (!u) return null;
+      let full = (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file://'))
+        ? u
+        : `${API_BASE_URL.replace(/\/+$/, '')}/${u.replace(/^\/+/, '')}`;
+      if (token && (full.startsWith('http://') || full.startsWith('https://')) && !full.includes('token=')) {
+        full += (full.includes('?') ? '&' : '?') + `token=${encodeURIComponent(token)}`;
+      }
+      return full;
+    };
+
+    if (Array.isArray(sourceImages) && sourceImages.length > 0) {
+      // Canonical panel sorting: front, back, mrp, batch, side, other
+      const panelOrder = { front: 1, back: 2, mrp: 3, batch: 4, side: 5, other: 6 };
+      const sorted = [...sourceImages].sort((a, b) => {
+        const orderA = panelOrder[a.panel?.toLowerCase()] || 99;
+        const orderB = panelOrder[b.panel?.toLowerCase()] || 99;
+        return orderA - orderB || (a.sequence || 0) - (b.sequence || 0);
+      });
+
+      sorted.forEach((img, i) => {
+        let rawUrl = img.url || (img.id && scanId ? `/scans/${scanId}/images/${img.id}` : null);
+        let rawThumbUrl = img.thumbnail_url || (img.id && scanId ? `/scans/${scanId}/images/${img.id}/thumbnail` : rawUrl);
+
         list.push({
-          id: img.id || i,
+          id: img.id ?? i,
           panel: img.panel || `panel_${i + 1}`,
-          url: img.url || img.thumbnail_url,
-          thumbnail_url: img.thumbnail_url || img.url,
-          sha256: img.sha256,
+          url: buildAuthUrl(rawUrl),
+          thumbnail_url: buildAuthUrl(rawThumbUrl),
+          sha256: img.sha256 || null,
+          token: token || null,
         });
       });
-    } else if (scan?.panelPhotos && typeof scan.panelPhotos === 'object') {
-      Object.entries(scan.panelPhotos).forEach(([p, uri], i) => {
+    } else if (currentScan?.panelPhotos || scan?.panelPhotos) {
+      const photos = currentScan?.panelPhotos || scan?.panelPhotos;
+      const canonicalPanels = ['front', 'back', 'mrp', 'batch'];
+      canonicalPanels.forEach((p, i) => {
+        const uri = photos[p];
         if (uri) {
           list.push({
-            id: i,
+            id: `local-${p}`,
             panel: p,
             url: uri,
             thumbnail_url: uri,
             sha256: null,
+            token: null,
+          });
+        }
+      });
+      Object.entries(photos).forEach(([p, uri]) => {
+        if (uri && !canonicalPanels.includes(p)) {
+          list.push({
+            id: `local-${p}`,
+            panel: p,
+            url: uri,
+            thumbnail_url: uri,
+            sha256: null,
+            token: null,
           });
         }
       });
@@ -329,14 +393,15 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
         list.push({
           id: img.image_id || i,
           panel: img.panel || `panel_${i + 1}`,
-          url: img.thumbnail_url,
-          thumbnail_url: img.thumbnail_url,
+          url: buildAuthUrl(img.thumbnail_url),
+          thumbnail_url: buildAuthUrl(img.thumbnail_url),
           sha256: img.sha256_recorded,
+          token: token || null,
         });
       });
     }
     return list;
-  }, [scan, evidenceIntegrity]);
+  }, [currentScan, scan, scanId, evidenceIntegrity]);
 
   const handleVerifyEvidence = async () => {
     if (!scanId) {
@@ -368,33 +433,21 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     }
   };
 
-  // Auto-sync fresh findings from server on mount
+  // Auto-sync fresh findings and scan details from server on mount
   useEffect(() => {
     if (!scanId) return;
     let active = true;
     (async () => {
       try {
         const fresh = await fetchScanDetails(scanId);
-        if (active && fresh && Array.isArray(fresh.findings) && fresh.findings.length > 0) {
-          const formatted = fresh.findings.map((f, idx) => ({
-            id: f.id || idx + 1,
-            server_id: typeof f.id === 'number' && f.id > 0 ? f.id : null,
-            check_id: f.check_id || f.code,
-            title: f.title || f.name,
-            citation: f.citation || '',
-            engine_verdict: f.engine_verdict || f.verdict || 'not_assessed',
-            effective_verdict: f.effective_verdict || f.human_verdict || f.engine_verdict || f.verdict || 'not_assessed',
-            human_verdict: f.human_verdict || null,
-            override_reason: f.override_reason || null,
-            observed: f.observed || 'Observation recorded',
-            required: f.required || '',
-            severity: f.severity || 'critical',
-            reason: f.reason || null,
-            confidence: f.confidence,
-          }));
-          setFindings(formatted);
-          if (onSaveFindings) {
-            onSaveFindings(formatted);
+        if (active && fresh) {
+          setCurrentScan(fresh);
+          if (Array.isArray(fresh.findings) && fresh.findings.length > 0) {
+            const formatted = formatFindings(fresh.findings);
+            setFindings(formatted);
+            if (onSaveFindings) {
+              onSaveFindings(formatted);
+            }
           }
         }
       } catch (e) {
@@ -418,83 +471,67 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     setReassessing(true);
     try {
       const assessed = await assessScan(scanId);
-      if (assessed && Array.isArray(assessed.findings)) {
-        const formatted = assessed.findings.map((f, idx) => ({
-          id: f.id || idx + 1,
-          server_id: typeof f.id === 'number' && f.id > 0 ? f.id : null,
-          check_id: f.check_id || f.code,
-          title: f.title || f.name,
-          citation: f.citation || '',
-          engine_verdict: f.engine_verdict || f.verdict || 'not_assessed',
-          effective_verdict: f.effective_verdict || f.human_verdict || f.engine_verdict || f.verdict || 'not_assessed',
-          human_verdict: f.human_verdict || null,
-          override_reason: f.override_reason || null,
-          observed: f.observed || 'Observation recorded',
-          required: f.required || '',
-          severity: f.severity || 'critical',
-          reason: f.reason || null,
-          confidence: f.confidence,
-        }));
-        setFindings(formatted);
-        if (onSaveFindings) {
-          onSaveFindings(formatted);
+      if (assessed) {
+        setCurrentScan(assessed);
+        if (Array.isArray(assessed.findings) && assessed.findings.length > 0) {
+          const formatted = formatFindings(assessed.findings);
+          setFindings(formatted);
+          if (onSaveFindings) {
+            onSaveFindings(formatted);
+          }
+          const pCount = formatted.filter((f) => f.effective_verdict === 'pass').length;
+          const fCount = formatted.filter((f) => f.effective_verdict === 'fail').length;
+          const nCount = formatted.filter((f) => f.effective_verdict === 'not_assessed').length;
+          const overallDisplay = assessed.overall_result ? assessed.overall_result.toUpperCase() : 'COMPLETED';
+          Alert.alert(
+            'Assessment Complete',
+            `Server assessment finished.\nVerdict: ${overallDisplay}\n\n✓ ${pCount} Compliant • ⚠️ ${fCount} Violation • ⚪ ${nCount} Not Assessed`
+          );
         }
-        const pCount = formatted.filter((f) => f.effective_verdict === 'pass').length;
-        const fCount = formatted.filter((f) => f.effective_verdict === 'fail').length;
-        const nCount = formatted.filter((f) => f.effective_verdict === 'not_assessed').length;
-        Alert.alert(
-          'Assessment Complete',
-          `Server assessment finished.\nResult: ${assessed.overall_result ? assessed.overall_result.toUpperCase() : 'COMPLETED'}\n\n✓ ${pCount} Compliant • ✗ ${fCount} Violation • ${nCount} Not Assessed`
-        );
       }
     } catch (err) {
-      const msg = err?.response?.data?.detail || err?.message || 'Server assessment failed';
-      const isNetwork = !err?.response && (err?.request || err?.code === 'ECONNABORTED' || /timeout|network|network request failed/i.test(msg));
-      Alert.alert(
-        'Assessment Error',
-        isNetwork
-          ? 'Could not reach the server (offline or it took too long). Your scan is kept here — tap the button again once you are online and it will be scored from your actual photos.'
-          : `Could not complete live server assessment:\n\n${msg}`
-      );
+      Alert.alert('Reassessment Error', err?.message || 'Server assessment could not be completed.');
     } finally {
       setReassessing(false);
       reassessBusyRef.current = false;
     }
   };
 
-  const handleOpenOverride = (f) => {
-    setSelectedFinding(f);
-    setOverrideVerdict(f.effective_verdict || f.engine_verdict || 'pass');
-    setOverrideReason(f.override_reason || '');
+  const handleOpenOverride = (finding) => {
+    setSelectedFinding(finding);
+    setOverrideVerdict(finding.human_verdict || finding.effective_verdict || 'pass');
+    setOverrideReason(finding.override_reason || '');
   };
 
   const handleSaveOverride = async () => {
+    if (!selectedFinding) return;
     if (!overrideReason.trim()) {
-      Alert.alert('Remark Required', 'Please provide an inspector remark or justification before saving.');
+      Alert.alert('Remark Required', 'Under Section 36 inspection rules, an officer remark or reason is required.');
       return;
     }
 
     setSubmittingOverride(true);
-    const applyLocal = () => {
-      const updated = findings.map((item) =>
-        item.check_id === selectedFinding.check_id
-          ? {
-              ...item,
-              human_verdict: overrideVerdict,
-              effective_verdict: overrideVerdict,
-              override_reason: overrideReason.trim(),
-            }
-          : item
-      );
-      setFindings(updated);
-      if (onSaveFindings) {
-        onSaveFindings(updated);
-      }
-      setSelectedFinding(null);
-    };
-
     try {
-      if (selectedFinding.server_id) {
+      const applyLocal = () => {
+        setFindings((prev) => {
+          const updated = prev.map((f) => {
+            if (f.id === selectedFinding.id || f.check_id === selectedFinding.check_id) {
+              return {
+                ...f,
+                human_verdict: overrideVerdict,
+                effective_verdict: overrideVerdict,
+                override_reason: overrideReason.trim(),
+              };
+            }
+            return f;
+          });
+          if (onSaveFindings) onSaveFindings(updated);
+          return updated;
+        });
+        setSelectedFinding(null);
+      };
+
+      if (selectedFinding.server_id && scanId) {
         try {
           await overrideFinding(selectedFinding.server_id, overrideVerdict, overrideReason.trim());
           Alert.alert('Remark Saved', 'Inspector remark and finding verdict successfully updated on the server.');
@@ -531,19 +568,64 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const passCount = findings.filter((f) => f.effective_verdict === 'pass').length;
   const failCount = findings.filter((f) => f.effective_verdict === 'fail').length;
   const notAssessedCount = findings.filter((f) => f.effective_verdict === 'not_assessed').length;
-  const overallResult = failCount > 0 ? 'violation' : (passCount > 0 && notAssessedCount === 0 ? 'compliant' : 'not_assessed');
+  const notApplicableCount = findings.filter((f) => f.effective_verdict === 'not_applicable' || f.effective_verdict === 'out_of_scope').length;
 
-  const brand = (scan?.brand_name && !scan.brand_name.toLowerCase().includes('unspecified')) ? scan.brand_name : null;
-  const commodity = (scan?.commodity_generic && !scan.commodity_generic.toLowerCase().includes('unspecified')) ? scan.commodity_generic : null;
-  const batch = (scan?.batch_number && scan.batch_number !== 'N/A') ? scan.batch_number : null;
+  // Authoritative overall verdict derivation
+  const rawOverall = currentScan?.overall_result;
+  let overallResult = 'not_assessed';
+  if (rawOverall === 'compliant' || rawOverall === 'pass') {
+    overallResult = 'compliant';
+  } else if (rawOverall === 'violation' || rawOverall === 'fail') {
+    overallResult = 'violation';
+  } else if (rawOverall === 'review_required' || rawOverall === 'manual_review') {
+    overallResult = 'review_required';
+  } else {
+    if (failCount > 0) {
+      overallResult = 'violation';
+    } else if (findings.some((f) => f.human_verdict || f.effective_verdict === 'review_required')) {
+      overallResult = 'review_required';
+    } else if (passCount > 0 && notAssessedCount === 0) {
+      overallResult = 'compliant';
+    } else {
+      overallResult = 'not_assessed';
+    }
+  }
 
-  const displayTitle = `${scan?.checks_total || findings.length || 26} Statutory Rule Checks`;
-  const displaySubtitle = `${brand || 'Product identity pending'} • ${commodity || 'Commodity not determined'}`;
-  const displayBatch = `Batch: ${batch || 'Batch not observed'} • ${findings.length} Checks Evaluated`;
+  // Product identity binding — truthful fallbacks
+  const brand = (currentScan?.brand_name && !currentScan.brand_name.toLowerCase().includes('unspecified')) ? currentScan.brand_name.trim() : null;
+  const commodity = (currentScan?.commodity_generic && !currentScan.commodity_generic.toLowerCase().includes('unspecified')) ? currentScan.commodity_generic.trim() : null;
+  const batch = (currentScan?.batch_number && currentScan.batch_number !== 'N/A' && !currentScan.batch_number.toLowerCase().includes('unspecified')) ? currentScan.batch_number.trim() : null;
+  const mrp = currentScan?.mrp;
+  const netQty = currentScan?.net_quantity_value ? `${currentScan.net_quantity_value} ${currentScan.net_quantity_unit || ''}`.trim() : null;
 
-  const isServerPending = Boolean(
-    (scan?.is_offline || (scan?.overall_result === 'not_assessed' && (!scan?.checks_assessed || scan?.checks_assessed === 0))) &&
-    Boolean(scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0))
+  let displaySubtitle;
+  if (brand && commodity) {
+    displaySubtitle = `${brand} — ${commodity}`;
+  } else if (commodity) {
+    displaySubtitle = commodity;
+  } else if (brand) {
+    displaySubtitle = `${brand} • Commodity not determined`;
+  } else {
+    displaySubtitle = 'Commodity not determined';
+  }
+
+  const displayBatch = `Batch: ${batch || 'Batch not observed'}${mrp ? ` • MRP: ₹${mrp}` : ''}${netQty ? ` • Net Qty: ${netQty}` : ''}`;
+  const displayTitle = `Statutory Findings (${findings.length})`;
+  const rulePackVersion = currentScan?.rule_pack_version || currentScan?.diagnostics?.rule_pack_version || '2026.09.v1';
+  const catalogRuleCount = currentScan?.diagnostics?.catalog_rule_count || 26;
+
+  // True server assessment completion status
+  const hasServerAssessed = Boolean(
+    currentScan?.status === 'assessed' ||
+    (currentScan?.overall_result && currentScan?.overall_result !== 'not_assessed') ||
+    (currentScan?.checks_assessed && currentScan?.checks_assessed > 0) ||
+    (findings.some((f) => f.engine_verdict && f.engine_verdict !== 'not_assessed'))
+  );
+
+  const isAwaitingAssessment = Boolean(
+    scanId &&
+    !hasServerAssessed &&
+    (currentScan?.status === 'captured' || currentScan?.status === 'pending' || !currentScan?.status)
   );
 
   return (
@@ -564,6 +646,11 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             <View style={{ flex: 1 }}>
               <Text style={styles.packageTitle}>{displaySubtitle}</Text>
               <Text style={styles.packageSub}>{displayBatch}</Text>
+              <View style={styles.packBadge}>
+                <Text style={styles.packBadgeText}>
+                  Rule Pack {rulePackVersion} • {catalogRuleCount} Catalog Rules
+                </Text>
+              </View>
             </View>
             <VerdictBadge result={overallResult} />
           </View>
@@ -602,15 +689,32 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                     { color: colors.notAssessed?.text || '#475569' },
                   ]}
                 >
-                  ⏳ {notAssessedCount} Pending
+                  ⚪ {notAssessedCount} Not Assessed
+                </Text>
+              </View>
+            )}
+            {notApplicableCount > 0 && (
+              <View
+                style={[
+                  styles.statBadge,
+                  { backgroundColor: colors.info?.fill || '#EFF6FF', borderColor: colors.info?.border || '#BFDBFE' },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.statBadgeText,
+                    { color: colors.info?.text || '#1D4ED8' },
+                  ]}
+                >
+                  ○ {notApplicableCount} Not Applicable
                 </Text>
               </View>
             )}
           </View>
         </Card>
 
-        {/* Run Server Assessment Action (only when genuinely pending) */}
-        {isServerPending && (
+        {/* Server Assessment Action: prominent button when awaiting; completed banner when done */}
+        {isAwaitingAssessment && (
           <View style={{ marginBottom: spacing.sm }}>
             <Pressable
               onPress={handleTriggerReassess}
@@ -622,18 +726,44 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
               {reassessing ? (
                 <View style={styles.rowAlign}>
                   <ActivityIndicator color={colors.white} size="small" style={{ marginRight: 8 }} />
-                  <Text style={styles.reassessBtnText}>Evaluating {findings.length} Statutory Checks with OCR & LLM…</Text>
+                  <Text style={styles.reassessBtnText}>Evaluating {findings.length || 26} Statutory Checks with OCR & LLM…</Text>
                 </View>
               ) : (
                 <Text style={styles.reassessBtnText}>
-                  ⚡ Run Server Assessment ({findings.length} Statutory Checks) →
+                  ⚡ Run Server Assessment ({findings.length || 26} Statutory Checks) →
                 </Text>
               )}
             </Pressable>
           </View>
         )}
 
-        {/* Confirm & Return Action — placed prominently right below main result and above checklist breakdown */}
+        {hasServerAssessed && (
+          <View style={styles.assessmentCompletedBar}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.assessmentCompletedTitle}>
+                ✓ Authoritative Server Assessment Completed
+              </Text>
+              <Text style={styles.assessmentCompletedSub}>
+                {findings.length} findings evaluated against Rule Pack {rulePackVersion}
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.reassessSecondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Re-run assessment"
+            >
+              {reassessing ? (
+                <ActivityIndicator color={colors.netraTeal} size="small" />
+              ) : (
+                <Text style={styles.reassessSecondaryBtnText}>🔄 Re-run</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {/* Confirm & Return Action */}
         <View style={{ marginBottom: spacing.lg }}>
           <PrimaryButton
             title="✓ Confirm & Return to Package List"
@@ -662,27 +792,24 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
               {evidenceImages.map((img, idx) => {
                 const rawUrl = img.thumbnail_url || img.url;
-                const fullUrl = rawUrl ? (
-                  (rawUrl.startsWith('http://') || rawUrl.startsWith('https://') || rawUrl.startsWith('file://'))
-                    ? rawUrl
-                    : `${API_BASE_URL.replace(/\/+$/, '')}/${rawUrl.replace(/^\/+/, '')}`
-                ) : null;
-                const highResUrl = img.url ? (
-                  (img.url.startsWith('http://') || img.url.startsWith('https://') || img.url.startsWith('file://'))
-                    ? img.url
-                    : `${API_BASE_URL.replace(/\/+$/, '')}/${img.url.replace(/^\/+/, '')}`
-                ) : fullUrl;
+                const highResUrl = img.url || rawUrl;
 
                 return (
                   <Pressable
-                    key={`panel-thumb-${scanId || 'scan'}-${img.id || idx}`}
+                    key={`evidence-${scanId || 'scan'}-${img.panel}-${img.id}-${img.sha256 || idx}`}
                     onPress={() => setSelectedImage({ ...img, displayUrl: highResUrl })}
                     style={styles.thumbWrapper}
                     accessibilityRole="imagebutton"
                     accessibilityLabel={`View ${img.panel} panel evidence`}
                   >
-                    {fullUrl ? (
-                      <Image source={{ uri: fullUrl }} style={styles.panelThumb} />
+                    {rawUrl ? (
+                      <Image
+                        source={{
+                          uri: rawUrl,
+                          headers: img.token ? { Authorization: `Bearer ${img.token}` } : undefined,
+                        }}
+                        style={styles.panelThumb}
+                      />
                     ) : (
                       <View style={[styles.panelThumb, { backgroundColor: colors.borderLight, justifyContent: 'center', alignItems: 'center' }]}>
                         <Text style={{ fontSize: 10, color: colors.textMuted }}>No photo</Text>
@@ -747,12 +874,12 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
         </Card>
 
         {/* List of Statutory Checks */}
-        <Text style={styles.sectionTitle}>CHECKLIST BREAKDOWN ({findings.length} STATUTORY CHECKS)</Text>
+        <Text style={styles.sectionTitle}>STATUTORY FINDINGS ({findings.length})</Text>
         {findings.map((f) => {
           return (
-            <Card key={f.check_id} padding="md" style={styles.findingCard}>
+            <Card key={`finding-${f.check_id}-${f.id}`} padding="md" style={styles.findingCard}>
               <View style={styles.rowBetween}>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, marginRight: 8 }}>
                   <View style={styles.rowAlign}>
                     <Text style={styles.checkCode}>{f.check_id}</Text>
                     <Text style={styles.checkName}>{f.title}</Text>
@@ -774,8 +901,22 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                 </View>
                 {f.reason && (
                   <View style={{ marginTop: 4 }}>
-                    <Text style={[styles.detailLabel, { color: colors.violation.text }]}>Non-compliance ground:</Text>
+                    <Text style={[styles.detailLabel, { color: colors.violation.text }]}>Non-compliance ground / Explanation:</Text>
                     <Text style={{ fontSize: 11, color: colors.violation.text }}>{f.reason}</Text>
+                  </View>
+                )}
+                {f.remediation && (
+                  <View style={{ marginTop: 4 }}>
+                    <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Statutory remediation:</Text>
+                    <Text style={{ fontSize: 11, color: colors.text }}>{f.remediation}</Text>
+                  </View>
+                )}
+                {f.evidence_references && f.evidence_references.length > 0 && (
+                  <View style={{ marginTop: 4, flexDirection: 'row', alignItems: 'center' }}>
+                    <Text style={styles.detailLabel}>Evidence Ref: </Text>
+                    <Text style={{ fontSize: 10, color: colors.textMuted }}>
+                      {Array.isArray(f.evidence_references) ? f.evidence_references.join(', ') : String(f.evidence_references)}
+                    </Text>
                   </View>
                 )}
                 {(f.human_verdict || f.override_reason) && (
@@ -801,7 +942,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
           );
         })}
 
-        {/* Bottom spacing so the last card doesn't hug the edge */}
+        {/* Bottom spacing */}
         <View style={{ height: spacing.xl }} />
       </ScrollView>
 
@@ -850,19 +991,19 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                   },
                 ]}
               >
-                <Text style={{ color: colors.notAssessed?.text || '#475569', fontWeight: '700', fontSize: 12 }}>⏳ Not Assessed</Text>
+                <Text style={{ color: colors.notAssessed?.text || '#475569', fontWeight: '700', fontSize: 12 }}>⚪ Not Assessed</Text>
               </Pressable>
               <Pressable
                 onPress={() => setOverrideVerdict('out_of_scope')}
                 style={[
                   styles.verdictBtn,
-                  overrideVerdict === 'out_of_scope' && {
-                    backgroundColor: colors.outOfScope?.fill || '#F1F5F9',
-                    borderColor: colors.outOfScope?.border || '#CBD5E1',
+                  (overrideVerdict === 'out_of_scope' || overrideVerdict === 'not_applicable') && {
+                    backgroundColor: colors.info?.fill || '#EFF6FF',
+                    borderColor: colors.info?.border || '#BFDBFE',
                   },
                 ]}
               >
-                <Text style={{ color: colors.outOfScope?.text || '#475569', fontWeight: '700', fontSize: 12 }}>⚪ Out of Scope</Text>
+                <Text style={{ color: colors.info?.text || '#1D4ED8', fontWeight: '700', fontSize: 12 }}>○ Not Applicable</Text>
               </Pressable>
             </View>
 
@@ -925,7 +1066,10 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             <View style={styles.imageModalBody}>
               {selectedImage?.displayUrl ? (
                 <Image
-                  source={{ uri: selectedImage.displayUrl }}
+                  source={{
+                    uri: selectedImage.displayUrl,
+                    headers: selectedImage.token ? { Authorization: `Bearer ${selectedImage.token}` } : undefined,
+                  }}
                   style={styles.fullscreenImage}
                   resizeMode="contain"
                 />
@@ -965,6 +1109,55 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.textMuted,
     marginTop: 2,
+  },
+  packBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surfaceHighlight || '#F8FAFC',
+    borderColor: colors.borderLight || '#E2E8F0',
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.xs || 4,
+    marginTop: 4,
+  },
+  packBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  assessmentCompletedBar: {
+    backgroundColor: colors.surface,
+    borderColor: colors.pass?.border || '#A7F3D0',
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  assessmentCompletedTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.pass?.text || '#047857',
+  },
+  assessmentCompletedSub: {
+    fontSize: 10,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  reassessSecondaryBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.background,
+  },
+  reassessSecondaryBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.netraTeal,
   },
   statBadge: {
     paddingHorizontal: 10,

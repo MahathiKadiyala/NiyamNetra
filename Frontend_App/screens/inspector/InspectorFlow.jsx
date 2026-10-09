@@ -167,6 +167,7 @@ export default function InspectorFlow({ navigation }) {
 
       {mode === 'findings' && (
         <FindingsScreen
+          key={selectedScan?.server_id || selectedScan?.id || 'scan'}
           scan={selectedScan}
           onBack={handleBackToSession}
           onSaveFindings={handleSaveFindings}

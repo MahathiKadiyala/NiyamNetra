@@ -40,10 +40,7 @@ const transactionTypes = [
   { key: 'other', label: 'Other', icon: '📋' },
 ];
 
-// Honest denominator copy: the server assesses 19 rows (CHK01–CHK18 + CHK06b).
-// The per-package assessed count comes back from the server after sync — this
-// screen never invents a local verdict or a local assessed count.
-const CHECKS_COPY = '19 checks (CHK01–CHK18 + CHK06b)';
+const CHECKS_COPY = 'Authoritative Statutory Checks (Rule Pack 2026.09.v1)';
 
 export default function ScanScreen({ navigation }) {
   const insets = useSafeAreaInsets();

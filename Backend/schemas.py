@@ -216,6 +216,9 @@ class ScanOut(ORMModel):
     commodity_generic: str | None = None
     brand_name: str | None = None
     batch_number: str | None = None
+    net_quantity_value: float | None = None
+    net_quantity_unit: str | None = None
+    mrp: float | None = None
     overall_result: ScanResult
     violation_limb: str | None = None
     recommended_action: str | None = None

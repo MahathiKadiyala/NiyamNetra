@@ -318,9 +318,9 @@ def chk03_chapter_ii_applicability(ctx: CheckContext) -> FindingResult:
             return t
 
     if ctx.net_quantity_value is not None and ctx.net_quantity_unit:
-        t.observed = f"Retail sale ({ctx.net_quantity_value:g} {ctx.net_quantity_unit}), within the Rule 3 quantity limits."
+        t.observed = f"Retail sale ({ctx.net_quantity_value:g} {ctx.net_quantity_unit}), within the Rule 3 statutory quantity limits."
     else:
-        t.observed = "Retail sale transaction within the Rule 3 statutory quantity limits."
+        t.observed = "Retail sale transaction confirmed; net quantity not declared or observed on package."
     return t
 
 

@@ -639,6 +639,32 @@ def _scan_out(db: Session, scan: Scan) -> ScanOut:
     out = ScanOut.model_validate(scan)
     out.counts = counts
     out.batch_number = scan.batch_number
+    out.net_quantity_value = scan.net_quantity_value
+    out.net_quantity_unit = scan.net_quantity_unit
+
+    # Enrich MRP if extracted from LLM structured data or findings
+    mrp_val = None
+    if scan.llm_structured_data:
+        try:
+            import json as _json
+            _s_data = _json.loads(scan.llm_structured_data)
+            _mrp_dict = _s_data.get("mrp") or {}
+            if _mrp_dict.get("value") is not None:
+                mrp_val = float(_mrp_dict["value"])
+        except Exception:
+            pass
+    if mrp_val is None:
+        mrp_f = next((r for r in rows if r.check_id == "CHK04"), None)
+        if mrp_f and mrp_f.observed:
+            import re as _re
+            _m = _re.search(r"(?:₹|Rs\.?|INR)\s*(\d+(?:\.\d{1,2})?)", mrp_f.observed, _re.I)
+            if _m:
+                try:
+                    mrp_val = float(_m.group(1))
+                except Exception:
+                    pass
+    out.mrp = mrp_val
+
     # Enrich image URLs for mobile client:
     for img_out in out.images:
         img_out.url = f"/scans/{scan.id}/images/{img_out.id}"
@@ -654,6 +680,7 @@ def _scan_out(db: Session, scan: Scan) -> ScanOut:
         "llm_status": "success" if scan.llm_structured_data else "none",
         "llm_duration_ms": scan.llm_duration_ms,
         "rule_pack_version": scan.rule_pack_version or settings.RULE_PACK_VERSION,
+        "catalog_rule_count": 26,
         "applicable_rule_count": scan.checks_total,
         "evaluated_rule_count": scan.checks_assessed,
         "overall_result": scan.overall_result,
@@ -1418,6 +1445,30 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
             _mfr_val = ctx.fields.get("manufacturer")
             if _mfr_val and _mfr_val.found and _mfr_val.value:
                 scan.brand_name = _mfr_val.value.split(",")[0].split("\n")[0].strip()
+
+    # Populate net quantity on scan and ctx if missing / placeholder
+    if not scan.net_quantity_value:
+        if _llm_res and getattr(_llm_res, "net_quantity", None) and getattr(_llm_res.net_quantity, "value", None) is not None:
+            try:
+                scan.net_quantity_value = float(_llm_res.net_quantity.value)
+                scan.net_quantity_unit = _llm_res.net_quantity.normalized_unit or _llm_res.net_quantity.unit or "g"
+                ctx.net_quantity_value = scan.net_quantity_value
+                ctx.net_quantity_unit = scan.net_quantity_unit
+            except Exception:
+                pass
+        else:
+            _nq_val = ctx.fields.get("net_quantity")
+            if _nq_val and _nq_val.found and _nq_val.value:
+                import re as _re
+                _m = _re.search(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", str(_nq_val.value))
+                if _m:
+                    try:
+                        scan.net_quantity_value = float(_m.group(1))
+                        scan.net_quantity_unit = _m.group(2).lower()
+                        ctx.net_quantity_value = scan.net_quantity_value
+                        ctx.net_quantity_unit = scan.net_quantity_unit
+                    except Exception:
+                        pass
     try:
         ctx.ocr_full_text = ocr.full_text  # consumed by assess for scan.ocr_text persistence
     except Exception:

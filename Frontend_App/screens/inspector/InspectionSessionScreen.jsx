@@ -587,17 +587,23 @@ export default function InspectionSessionScreen({
         {packages.length > 0 && (
           <View style={{ marginBottom: spacing.md }}>
             <Text style={styles.sectionHeader}>PACKAGES SAMPLED THIS VISIT</Text>
-            {packages.map((pkg, idx) => (
-              <Card key={pkg.id || idx} padding="sm" style={styles.packageCard}>
-                <View style={styles.rowBetween}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text }}>
-                      #{idx + 1}: {(pkg.brand_name && !pkg.brand_name.toLowerCase().includes('unspecified')) ? pkg.brand_name : 'Product identity pending'} ({(pkg.commodity_generic && !pkg.commodity_generic.toLowerCase().includes('unspecified')) ? pkg.commodity_generic : 'Commodity not determined'})
-                    </Text>
-                    <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
-                      Batch: {(pkg.batch_number && pkg.batch_number !== 'N/A') ? pkg.batch_number : 'Batch not observed'} • {pkg.checks_total || 26} Checks Evaluated
-                    </Text>
-                  </View>
+            {packages.map((pkg, idx) => {
+              const bName = (pkg.brand_name && !pkg.brand_name.toLowerCase().includes('unspecified')) ? pkg.brand_name.trim() : null;
+              const cName = (pkg.commodity_generic && !pkg.commodity_generic.toLowerCase().includes('unspecified')) ? pkg.commodity_generic.trim() : null;
+              const pkgTitle = bName && cName ? `${bName} — ${cName}` : (cName || (bName ? `${bName} • Commodity not determined` : 'Commodity not determined'));
+              const checksCount = pkg.checks_total || (Array.isArray(pkg.findings) ? pkg.findings.length : 26);
+
+              return (
+                <Card key={pkg.id || idx} padding="sm" style={styles.packageCard}>
+                  <View style={styles.rowBetween}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text }}>
+                        #{idx + 1}: {pkgTitle}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
+                        Batch: {(pkg.batch_number && pkg.batch_number !== 'N/A' && !pkg.batch_number.toLowerCase().includes('unspecified')) ? pkg.batch_number : 'Batch not observed'} • {checksCount} Checks Evaluated
+                      </Text>
+                    </View>
                   <View style={[styles.rowAlign, { gap: 6 }]}>
                     <VerdictBadge result={pkg.overall_result || 'not_assessed'} size="sm" />
                     <VerdictBadge status={pkg.server_id ? 'synced' : 'not_synced'} size="sm" />
@@ -842,7 +848,7 @@ export default function InspectionSessionScreen({
         {/* Package Action Buttons */}
         <View style={{ gap: spacing.sm, marginBottom: spacing.xl }}>
           <PrimaryButton
-            title={assessing ? 'Evaluating 19 Checks…' : 'Assess Package (19 Rule Checks) →'}
+            title={assessing ? 'Evaluating Statutory Checks…' : 'Assess Package (Statutory Rule Checks) →'}
             onPress={handleAssessCurrentPackage}
             disabled={assessing || capturedCount === 0}
             accessibilityLabel="Run Legal Metrology statutory checks"

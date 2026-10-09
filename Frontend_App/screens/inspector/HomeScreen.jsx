@@ -345,7 +345,7 @@ export default function HomeScreen({ navigation, onStartInspection, onResumeInsp
                 Legal Metrology (Packaged Commodities) Rules 2011
               </Text>
               <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2, lineHeight: 15 }}>
-                19 Automated Rule Checks (CHK01–CHK18 + CHK06b) active. Pre-packaged retail goods require all mandatory declarations before sale.
+                Authoritative Statutory Rule Checks (Rule Pack 2026.09.v1) active. Pre-packaged retail goods require all mandatory declarations before sale.
               </Text>
             </View>
           </View>

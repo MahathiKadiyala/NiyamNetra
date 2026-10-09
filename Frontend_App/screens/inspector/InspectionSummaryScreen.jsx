@@ -254,19 +254,26 @@ export default function InspectionSummaryScreen({
               </Text>
             </View>
           ) : (
-            packages.map((pkg, idx) => (
-              <View key={pkg.id || idx} style={[styles.pkgRow, idx > 0 && styles.pkgRowBorder]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text }}>
-                    #{idx + 1}: {pkg.brand_name} ({pkg.commodity_generic})
-                  </Text>
-                  <Text style={{ fontSize: 10, color: colors.textMuted }}>
-                    Batch: {pkg.batch_number || 'N/A'}
-                  </Text>
+            packages.map((pkg, idx) => {
+              const bName = (pkg.brand_name && !pkg.brand_name.toLowerCase().includes('unspecified')) ? pkg.brand_name.trim() : null;
+              const cName = (pkg.commodity_generic && !pkg.commodity_generic.toLowerCase().includes('unspecified')) ? pkg.commodity_generic.trim() : null;
+              const batchVal = (pkg.batch_number && pkg.batch_number !== 'N/A' && !pkg.batch_number.toLowerCase().includes('unspecified')) ? pkg.batch_number.trim() : null;
+              const displayName = bName && cName ? `${bName} — ${cName}` : (cName || (bName ? `${bName} • Commodity not determined` : 'Commodity not determined'));
+
+              return (
+                <View key={pkg.id || idx} style={[styles.pkgRow, idx > 0 && styles.pkgRowBorder]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text }}>
+                      #{idx + 1}: {displayName}
+                    </Text>
+                    <Text style={{ fontSize: 10, color: colors.textMuted }}>
+                      Batch: {batchVal || 'Batch not observed'}
+                    </Text>
+                  </View>
+                  <VerdictBadge result={pkg.overall_result || 'not_assessed'} />
                 </View>
-                <VerdictBadge result={pkg.overall_result || 'not_assessed'} />
-              </View>
-            ))
+              );
+            })
           )}
         </Card>
 
