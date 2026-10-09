@@ -8,6 +8,7 @@ import EmptyState from '../../components/EmptyState';
 import SegmentControl from '../../components/SegmentControl';
 import { fetchInspections } from '../../api/admin';
 import { API_BASE_URL } from '../../api/config';
+import { getAccessToken } from '../../api/client';
 
 // §5.3 Pass/Compliant inspections list — live data from GET /inspections.
 function todayLocal() {
@@ -188,7 +189,16 @@ export default function PassScreen({ navigation }) {
                           ? rawUri
                           : `${API_BASE_URL.replace(/\/+$/, '')}/${rawUri.replace(/^\/+/, '')}`;
                         return (
-                          <Image key={i} source={{ uri }} style={{ width: 160, height: 160, borderRadius: radius.md, marginRight: spacing.sm, backgroundColor: colors.borderLight }} />
+                          <Image
+                            key={i}
+                            source={{
+                              uri,
+                              headers: (getAccessToken() && !uri.startsWith('file://'))
+                                ? { Authorization: `Bearer ${getAccessToken()}` }
+                                : undefined,
+                            }}
+                            style={{ width: 160, height: 160, borderRadius: radius.md, marginRight: spacing.sm, backgroundColor: colors.borderLight }}
+                          />
                         );
                       })}
                     </ScrollView>

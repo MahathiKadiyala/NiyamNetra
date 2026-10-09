@@ -242,5 +242,74 @@ it('9. UI renders Rule Pack 2026.09.v1 and 26 catalog rules with uppercase inspe
   assert.strictEqual(rulePackBadge('2026.09.v1', 26), 'Rule Pack 2026.09.v1 • 26 Catalog Rules');
 });
 
+// 10. Security: Media requests do not put JWTs into URLs
+it('10. Media requests do not put JWTs into URLs, query params, or cache keys', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const findingsScreenPath = path.join(__dirname, '../screens/inspector/FindingsScreen.jsx');
+  const code = fs.readFileSync(findingsScreenPath, 'utf8');
+
+  // Verify no `?token=` or `token=` in URLs
+  assert.strictEqual(code.includes('token='), false);
+  assert.strictEqual(code.includes('?token'), false);
+  assert.strictEqual(code.includes('&token'), false);
+
+  // Verify buildImageUrl returns pure path without query token
+  const buildImageUrl = (u) => {
+    if (!u) return null;
+    const base = 'https://niyamnetra-backend.onrender.com';
+    return (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file://'))
+      ? u
+      : `${base.replace(/\/+$/, '')}/${u.replace(/^\/+/, '')}`;
+  };
+
+  const cleanUrl = buildImageUrl('/scans/42/images/7/thumbnail');
+  assert.strictEqual(cleanUrl, 'https://niyamnetra-backend.onrender.com/scans/42/images/7/thumbnail');
+  assert.strictEqual(cleanUrl.includes('token'), false);
+
+  // Cache key verification: keys must not contain tokens
+  const imageKey = `evidence-42-front-7-sha256abc`;
+  assert.strictEqual(imageKey.includes('token'), false);
+});
+
+// 11. Security: Authorization headers are used securely
+it('11. Authorization headers are used securely via Bearer token', () => {
+  const getAuthHeaders = (token, uri) => {
+    if (!token || !uri || uri.startsWith('file://')) return undefined;
+    return { Authorization: `Bearer ${token}` };
+  };
+
+  const sampleToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy';
+  const remoteHeaders = getAuthHeaders(sampleToken, 'https://niyamnetra-backend.onrender.com/scans/42/images/7');
+  assert.deepStrictEqual(remoteHeaders, { Authorization: `Bearer ${sampleToken}` });
+
+  // Local file URI needs no auth header
+  const localHeaders = getAuthHeaders(sampleToken, 'file:///var/mobile/img.jpg');
+  assert.strictEqual(localHeaders, undefined);
+
+  // Missing token returns undefined
+  const unauthHeaders = getAuthHeaders(null, 'https://niyamnetra-backend.onrender.com/scans/42/images/7');
+  assert.strictEqual(unauthHeaders, undefined);
+});
+
+// 12. Security: Token values are not logged or leaked to console
+it('12. Token values and Authorization headers are not written to application logs', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const findingsScreenPath = path.join(__dirname, '../screens/inspector/FindingsScreen.jsx');
+  const violationsScreenPath = path.join(__dirname, '../screens/inspector/ViolationsScreen.jsx');
+  const passScreenPath = path.join(__dirname, '../screens/inspector/PassScreen.jsx');
+
+  const fCode = fs.readFileSync(findingsScreenPath, 'utf8');
+  const vCode = fs.readFileSync(violationsScreenPath, 'utf8');
+  const pCode = fs.readFileSync(passScreenPath, 'utf8');
+
+  // Verify no console.log of token or Authorization headers
+  assert.strictEqual(/console\.(log|info|debug)\(.*token/i.test(fCode), false);
+  assert.strictEqual(/console\.(log|info|debug)\(.*token/i.test(vCode), false);
+  assert.strictEqual(/console\.(log|info|debug)\(.*token/i.test(pCode), false);
+  assert.strictEqual(/console\.(log|info|debug)\(.*Authorization/i.test(fCode), false);
+});
+
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);

@@ -310,6 +310,29 @@ def test_panel_to_image_mapping_and_distinct_image_urls(env):
         assert panels_a[p]["id"] != panels_b[p]["id"]
         assert panels_a[p]["url"] != panels_b[p]["url"]
         assert panels_a[p]["sha256"] != panels_b[p]["sha256"]
+        # URLs must NEVER contain query token leaks
+        assert "token=" not in panels_a[p]["url"]
+        assert "token=" not in panels_a[p]["thumbnail_url"]
+
+    # Verify authorized access succeeds without query token
+    front_img_id = panels_a["front"]["id"]
+    thumb_res = client.get(f"/scans/{scan_a.id}/images/{front_img_id}/thumbnail")
+    assert thumb_res.status_code == 200
+    assert thumb_res.headers["content-type"] == "image/jpeg"
+
+    # Verify full image access succeeds without query token
+    full_res = client.get(f"/scans/{scan_a.id}/images/{front_img_id}")
+    assert full_res.status_code == 200
+    assert "image/" in full_res.headers["content-type"]
+
+    # Verify unauthorized access fails with 401 when no credentials provided
+    app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(require_inspector, None)
+    unauth_client = TestClient(app)
+    unauth_res = unauth_client.get(f"/scans/{scan_a.id}/images/{front_img_id}/thumbnail")
+    assert unauth_res.status_code == 401
+    app.dependency_overrides[get_current_user] = lambda: inspector
+    app.dependency_overrides[require_inspector] = lambda: inspector
 
 
 def test_completed_assessment_diagnostics_and_counters(env):

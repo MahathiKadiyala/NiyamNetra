@@ -327,15 +327,11 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     const sourceImages = currentScan?.images || scan?.images;
     const token = getAccessToken();
 
-    const buildAuthUrl = (u) => {
+    const buildImageUrl = (u) => {
       if (!u) return null;
-      let full = (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file://'))
+      return (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file://'))
         ? u
         : `${API_BASE_URL.replace(/\/+$/, '')}/${u.replace(/^\/+/, '')}`;
-      if (token && (full.startsWith('http://') || full.startsWith('https://')) && !full.includes('token=')) {
-        full += (full.includes('?') ? '&' : '?') + `token=${encodeURIComponent(token)}`;
-      }
-      return full;
     };
 
     if (Array.isArray(sourceImages) && sourceImages.length > 0) {
@@ -354,10 +350,9 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
         list.push({
           id: img.id ?? i,
           panel: img.panel || `panel_${i + 1}`,
-          url: buildAuthUrl(rawUrl),
-          thumbnail_url: buildAuthUrl(rawThumbUrl),
+          url: buildImageUrl(rawUrl),
+          thumbnail_url: buildImageUrl(rawThumbUrl),
           sha256: img.sha256 || null,
-          token: token || null,
         });
       });
     } else if (currentScan?.panelPhotos || scan?.panelPhotos) {
@@ -372,7 +367,6 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             url: uri,
             thumbnail_url: uri,
             sha256: null,
-            token: null,
           });
         }
       });
@@ -384,7 +378,6 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             url: uri,
             thumbnail_url: uri,
             sha256: null,
-            token: null,
           });
         }
       });
@@ -393,10 +386,9 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
         list.push({
           id: img.image_id || i,
           panel: img.panel || `panel_${i + 1}`,
-          url: buildAuthUrl(img.thumbnail_url),
-          thumbnail_url: buildAuthUrl(img.thumbnail_url),
+          url: buildImageUrl(img.thumbnail_url),
+          thumbnail_url: buildImageUrl(img.thumbnail_url),
           sha256: img.sha256_recorded,
-          token: token || null,
         });
       });
     }
@@ -806,7 +798,9 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                       <Image
                         source={{
                           uri: rawUrl,
-                          headers: img.token ? { Authorization: `Bearer ${img.token}` } : undefined,
+                          headers: (getAccessToken() && !rawUrl.startsWith('file://'))
+                            ? { Authorization: `Bearer ${getAccessToken()}` }
+                            : undefined,
                         }}
                         style={styles.panelThumb}
                       />
@@ -1068,7 +1062,9 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                 <Image
                   source={{
                     uri: selectedImage.displayUrl,
-                    headers: selectedImage.token ? { Authorization: `Bearer ${selectedImage.token}` } : undefined,
+                    headers: (getAccessToken() && !selectedImage.displayUrl.startsWith('file://'))
+                      ? { Authorization: `Bearer ${getAccessToken()}` }
+                      : undefined,
                   }}
                   style={styles.fullscreenImage}
                   resizeMode="contain"

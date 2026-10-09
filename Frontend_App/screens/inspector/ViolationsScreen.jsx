@@ -9,6 +9,7 @@ import FindingRow from '../../components/FindingRow';
 import SegmentControl from '../../components/SegmentControl';
 import { fetchInspections } from '../../api/admin';
 import { API_BASE_URL } from '../../api/config';
+import { getAccessToken } from '../../api/client';
 
 // §5.4 Violations list — live data from GET /inspections, with detail view.
 function todayLocal() {
@@ -189,7 +190,12 @@ export default function ViolationsScreen({ navigation }) {
                       accessibilityLabel={`Evidence image ${i + 1}`}
                     >
                       <Image
-                        source={{ uri }}
+                        source={{
+                          uri,
+                          headers: (getAccessToken() && !uri.startsWith('file://'))
+                            ? { Authorization: `Bearer ${getAccessToken()}` }
+                            : undefined,
+                        }}
                         style={{ width: 60, height: 60, borderRadius: radius.sm, backgroundColor: colors.border, margin: spacing.xs, borderWidth: 2, borderColor: colors.saffron }}
                       />
                     </Pressable>
