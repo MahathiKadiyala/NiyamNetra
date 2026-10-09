@@ -157,6 +157,7 @@ export default function InspectorFlow({ navigation }) {
 
       {mode === 'session' && (
         <InspectionSessionScreen
+          key={activeSession?.serverInspectionId || activeSession?.id || 'session'}
           inspectionSession={activeSession}
           onPackageAssessed={handlePackageAssessed}
           onViewFindings={handleViewFindings}

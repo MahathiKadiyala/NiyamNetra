@@ -122,6 +122,24 @@ export default function InspectionSessionScreen({
   // Completed packages in this visit
   const [packages, setPackages] = useState(inspectionSession?.scans || []);
 
+  // Synchronize packages and clear in-flight package state when session changes
+  useEffect(() => {
+    setPackages(inspectionSession?.scans || []);
+  }, [inspectionSession?.id, inspectionSession?.serverInspectionId, inspectionSession?.scans]);
+
+  useEffect(() => {
+    setPanelPhotos({});
+    setPanelEvidence({});
+    setCommodity('');
+    setBrand('');
+    setBatch('');
+    setHasSticker(false);
+    setIsImported(false);
+    setIsPerishable(false);
+    setIsBlownMoulded(false);
+    setActivePanel('front');
+  }, [inspectionSession?.id, inspectionSession?.serverInspectionId]);
+
   const cameraRef = useRef(null);
   const assessingRef = useRef(false);
   useAppLock({ enabled: true });
@@ -619,7 +637,8 @@ export default function InspectionSessionScreen({
                   </View>
                 </View>
               </Card>
-            ))}
+            );
+          })}
           </View>
         )}
 

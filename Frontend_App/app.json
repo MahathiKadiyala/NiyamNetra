@@ -2,7 +2,7 @@
   "expo": {
     "name": "NiyamNetra",
     "slug": "niyamnetra-app",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -33,7 +33,7 @@
         "backgroundColor": "#0F2A44"
       },
       "package": "com.niyamnetra.app",
-      "versionCode": 5,
+      "versionCode": 6,
       "permissions": [
         "CAMERA",
         "ACCESS_FINE_LOCATION",

@@ -426,5 +426,50 @@ it('18. Evidence image URLs and cache keys contain strictly zero JWT tokens', ()
   assert.strictEqual(cacheKey.includes('token'), false);
 });
 
+// 19. Cross-inspection isolation: packages list and in-flight inputs do not persist across inspections
+it('19. Inspection session transition isolates sampled packages and clears in-flight state', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const sessionScreenPath = path.join(__dirname, '../screens/inspector/InspectionSessionScreen.jsx');
+  const sessionScreenCode = fs.readFileSync(sessionScreenPath, 'utf8');
+
+  // Verify synchronization useEffect exists
+  assert.strictEqual(
+    sessionScreenCode.includes('setPackages(inspectionSession?.scans || [])'),
+    true
+  );
+  assert.strictEqual(
+    sessionScreenCode.includes('setPanelPhotos({})'),
+    true
+  );
+
+  // InspectorFlow must supply key to session screen
+  const flowPath = path.join(__dirname, '../screens/inspector/InspectorFlow.jsx');
+  const flowCode = fs.readFileSync(flowPath, 'utf8');
+  assert.strictEqual(
+    flowCode.includes('key={activeSession?.serverInspectionId || activeSession?.id || \'session\'}'),
+    true
+  );
+});
+
+// 20. FindingsScreen isolates assessment findings and resets stale state across scans
+it('20. FindingsScreen sync effect updates on findings/verdict and isolates evidence state', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const findingsScreenPath = path.join(__dirname, '../screens/inspector/FindingsScreen.jsx');
+  const findingsScreenCode = fs.readFileSync(findingsScreenPath, 'utf8');
+
+  // Verify sync effect watches findings and overall_result
+  assert.strictEqual(
+    findingsScreenCode.includes('[scan?.id, scan?.server_id, scan?.findings, scan?.overall_result, scan?.updated_at]'),
+    true
+  );
+  assert.strictEqual(
+    findingsScreenCode.includes('setFindings(buildInitialFindings(scan))'),
+    true
+  );
+});
+
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
+

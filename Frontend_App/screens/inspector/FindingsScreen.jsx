@@ -318,7 +318,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     setEvidenceIntegrity(null);
     setSelectedFinding(null);
     setSelectedImage(null);
-  }, [scan?.id, scan?.server_id]);
+  }, [scan?.id, scan?.server_id, scan?.findings, scan?.overall_result, scan?.updated_at]);
 
   const scanId = currentScan?.server_id || (typeof currentScan?.id === 'number' && currentScan.id > 0 ? currentScan.id : null) || scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
 
