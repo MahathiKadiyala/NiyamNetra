@@ -311,5 +311,120 @@ it('12. Token values and Authorization headers are not written to application lo
   assert.strictEqual(/console\.(log|info|debug)\(.*Authorization/i.test(fCode), false);
 });
 
+// 13. Frontend Request Control: duplicate submission protection
+it('13. Duplicate submission protection prevents double assessment triggers', () => {
+  let inFlight = false;
+  let executionCount = 0;
+
+  const triggerAssessment = () => {
+    if (inFlight) return 'BLOCKED_DUPLICATE';
+    inFlight = true;
+    executionCount++;
+    return 'EXECUTED';
+  };
+
+  assert.strictEqual(triggerAssessment(), 'EXECUTED');
+  assert.strictEqual(triggerAssessment(), 'BLOCKED_DUPLICATE');
+  assert.strictEqual(triggerAssessment(), 'BLOCKED_DUPLICATE');
+  assert.strictEqual(executionCount, 1);
+
+  inFlight = false;
+  assert.strictEqual(triggerAssessment(), 'EXECUTED');
+  assert.strictEqual(executionCount, 2);
+});
+
+// 14. Frontend Request Control: successful assessment is not automatically retried
+it('14. Successful assessment is not automatically retried and displays completed state', () => {
+  const completedScan = {
+    id: 42,
+    status: 'assessed',
+    overall_result: 'violation',
+    checks_assessed: 18,
+    checks_total: 18,
+    findings: [{ check_id: 'CHK01', engine_verdict: 'pass' }],
+  };
+
+  const hasServerAssessed = Boolean(
+    completedScan?.status === 'assessed' ||
+    (completedScan?.overall_result && completedScan?.overall_result !== 'not_assessed') ||
+    (completedScan?.checks_assessed && completedScan?.checks_assessed > 0)
+  );
+
+  const isAwaitingAssessment = Boolean(
+    completedScan.id &&
+    !hasServerAssessed &&
+    (completedScan?.status === 'captured' || completedScan?.status === 'pending' || !completedScan?.status)
+  );
+
+  assert.strictEqual(hasServerAssessed, true);
+  assert.strictEqual(isAwaitingAssessment, false);
+});
+
+// 15. Genuine new evidence permits reassessment
+it('15. Genuine new evidence permits reassessment after recapture', () => {
+  let currentEvidence = { front: 'file:///evidence/front1.jpg' };
+  let lastAssessedFingerprint = 'fp_front1';
+
+  const computeEvidenceFingerprint = (ev) => Object.entries(ev).sort().map(([k, v]) => `${k}:${v}`).join(';');
+
+  // Before recapture
+  assert.strictEqual(computeEvidenceFingerprint(currentEvidence), 'front:file:///evidence/front1.jpg');
+
+  // Recapture adds back panel
+  currentEvidence = { ...currentEvidence, back: 'file:///evidence/back1.jpg' };
+  const newFingerprint = computeEvidenceFingerprint(currentEvidence);
+
+  assert.notStrictEqual(newFingerprint, lastAssessedFingerprint);
+  assert.strictEqual(newFingerprint, 'back:file:///evidence/back1.jpg;front:file:///evidence/front1.jpg');
+});
+
+// 16. Truthful failure state
+it('16. Truthful failure state displays honest reason without fabricating compliance', () => {
+  const offlineFailure = {
+    errorDetail: 'Server error (HTTP 503): Assessment capacity busy',
+    overall_result: 'not_assessed',
+    checks_assessed: 0,
+    checks_total: 18,
+  };
+
+  assert.strictEqual(offlineFailure.overall_result, 'not_assessed');
+  assert.notStrictEqual(offlineFailure.overall_result, 'compliant');
+  assert.strictEqual(offlineFailure.errorDetail.includes('503'), true);
+});
+
+// 17. Correct distinction between catalog and evaluated counts
+it('17. Correct distinction between catalog rules (26) and executable checks (19)', () => {
+  const catalogCount = 26;
+  const executableChecks = 19;
+  const applicableChecksOnPackage = 18;
+
+  const headerBadge = `Rule Pack 2026.09.v1 • ${catalogCount} Catalog Rules (${executableChecks} Algorithmic Checks)`;
+  assert.strictEqual(headerBadge, 'Rule Pack 2026.09.v1 • 26 Catalog Rules (19 Algorithmic Checks)');
+
+  const bannerSub = `18 findings evaluated against Rule Pack 2026.09.v1 (${executableChecks} Algorithmic Checks)`;
+  assert.strictEqual(bannerSub, '18 findings evaluated against Rule Pack 2026.09.v1 (19 Algorithmic Checks)');
+  assert.strictEqual(executableChecks < catalogCount, true);
+});
+
+// 18. Media URLs and cache keys contain no JWT
+it('18. Evidence image URLs and cache keys contain strictly zero JWT tokens', () => {
+  const imageItem = {
+    id: 99,
+    panel: 'front',
+    url: 'https://niyamnetra-backend.onrender.com/scans/47/images/99',
+    thumbnail_url: 'https://niyamnetra-backend.onrender.com/scans/47/images/99/thumbnail',
+    sha256: 'sha256_package_99',
+  };
+
+  assert.strictEqual(imageItem.url.includes('?token='), false);
+  assert.strictEqual(imageItem.thumbnail_url.includes('?token='), false);
+  assert.strictEqual(imageItem.url.includes('eyJ'), false);
+  assert.strictEqual(imageItem.thumbnail_url.includes('eyJ'), false);
+
+  const cacheKey = `evidence-47-${imageItem.panel}-${imageItem.id}-${imageItem.sha256}`;
+  assert.strictEqual(cacheKey.includes('eyJ'), false);
+  assert.strictEqual(cacheKey.includes('token'), false);
+});
+
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);

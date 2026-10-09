@@ -605,6 +605,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const displayTitle = `Statutory Findings (${findings.length})`;
   const rulePackVersion = currentScan?.rule_pack_version || currentScan?.diagnostics?.rule_pack_version || '2026.09.v1';
   const catalogRuleCount = currentScan?.diagnostics?.catalog_rule_count || 26;
+  const executableCheckCount = currentScan?.diagnostics?.executable_check_count || 19;
 
   // True server assessment completion status
   const hasServerAssessed = Boolean(
@@ -640,7 +641,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
               <Text style={styles.packageSub}>{displayBatch}</Text>
               <View style={styles.packBadge}>
                 <Text style={styles.packBadgeText}>
-                  Rule Pack {rulePackVersion} • {catalogRuleCount} Catalog Rules
+                  Rule Pack {rulePackVersion} • {catalogRuleCount} Catalog Rules ({executableCheckCount} Algorithmic Checks)
                 </Text>
               </View>
             </View>
@@ -736,7 +737,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                 ✓ Authoritative Server Assessment Completed
               </Text>
               <Text style={styles.assessmentCompletedSub}>
-                {findings.length} findings evaluated against Rule Pack {rulePackVersion}
+                {findings.length} findings evaluated against Rule Pack {rulePackVersion} ({executableCheckCount} Algorithmic Checks)
               </Text>
             </View>
             <Pressable

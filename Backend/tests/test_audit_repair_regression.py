@@ -70,8 +70,14 @@ def env():
         yield eng, db, inspector, store, client
     finally:
         app.dependency_overrides.clear()
-        db.close()
-        eng.dispose()
+        try:
+            db.close()
+        except Exception:
+            pass
+        try:
+            eng.dispose()
+        except Exception:
+            pass
 
 
 def _make_dummy_image(text="TEST PACKAGING", width=600, height=800, color=(240, 240, 240)):

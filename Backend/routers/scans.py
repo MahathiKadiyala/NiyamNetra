@@ -44,6 +44,38 @@ ALLOWED_QUANTITY_UNITS = {
 }
 
 _OCR_CACHE_SALT = "ocr-v2"
+_SCAN_IN_FLIGHT: dict[int, threading.Event] = {}
+_SCAN_IN_FLIGHT_LOCK = threading.Lock()
+_ASSESSMENT_FINGERPRINTS: dict[int, str] = {}
+
+
+def compute_assessment_fingerprint(scan: Scan, images: list[ScanImage]) -> str:
+    """Compute deterministic, stable assessment input fingerprint based on:
+    - ordered image identities, panels, and SHA-256 hashes
+    - rule pack version
+    - LLM prompt & schema versions
+    - declared statutory scope & geometry inputs
+    Does NOT depend only on scan_id and does NOT include random timestamps."""
+    import hashlib
+    from datetime import date
+    from llm.prompts import PROMPT_VERSION, SCHEMA_VERSION
+    rp = getattr(scan, "rule_pack_version", None)
+    if not rp:
+        if getattr(scan, "rules_as_at", None) and scan.rules_as_at >= date(2026, 9, 21):
+            rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+        else:
+            rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+    scale_src = getattr(scan, "scale_source", None) or "declared"
+    parts = [
+        f"rp:{rp}",
+        f"pv:{PROMPT_VERSION}",
+        f"sv:{SCHEMA_VERSION}",
+        f"scope:{scan.is_imported}:{scan.is_perishable}:{scan.is_medical_device}:{scan.is_tobacco}:{scan.has_sticker}:{scan.sticker_reduces_price}:{scan.sticker_covers_original}",
+        f"geom:{scan.panel_shape}:{scan.panel_height_mm}:{scan.panel_width_mm}:{scan.panel_diameter_mm}:{scan.total_surface_area_cm2}:{scan.is_blown_moulded}:{scale_src}",
+    ]
+    img_parts = sorted(f"{getattr(im, 'id', 0)}:{im.panel}:{im.sha256}" for im in images)
+    parts.append("imgs:" + "|".join(img_parts))
+    return hashlib.sha256(";".join(parts).encode("utf-8")).hexdigest()
 
 
 def _label_for(line) -> str | None:
@@ -284,6 +316,9 @@ async def upload_image(
             # Invalidate any cached assessment on scan since image set has changed
             scan.ocr_cache_hash = None
             scan.ocr_cache = None
+            scan.llm_cache_hash = None
+            scan.llm_structured_data = None
+            _ASSESSMENT_FINGERPRINTS.pop(scan.id, None)
             db.commit()
             break
         except IntegrityError:
@@ -415,35 +450,87 @@ def assess_scan(
     cpu_count); if the pool is busy for ASSESS_QUEUE_WAIT_S the endpoint
     returns 503 with Retry-After instead of OOMing the worker.
     """
-    import hashlib as _hashlib
     import logging as _log
     _logger = _log.getLogger("niyamnetra.assess")
 
-    # Fast idempotency check before acquiring concurrency semaphore
+    _imgs = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
+    curr_fingerprint = compute_assessment_fingerprint(scan, _imgs)
+
+    # Fast idempotency check before acquiring concurrency semaphore or waiting
     if not force:
         _existing_findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
-        if _existing_findings and scan.overall_result not in ("not_assessed", None):
-            _imgs = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
-            _img_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
-            _curr_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_parts)).encode()).hexdigest()
-            if getattr(scan, "ocr_cache_hash", None) == _curr_hash:
-                _logger.info(
-                    "[ASSESSMENT] idempotent_assessment_reused scan_id=%s hash=%s checks_count=%d",
-                    scan.id, _curr_hash[:12], len(_existing_findings)
-                )
-                return _scan_out(db, scan)
+        cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
+        import hashlib as _hashlib
+        _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
+        _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
+        is_identical = (cached_fp == curr_fingerprint) or (
+            bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) == _set_hash and scan.overall_result is not None
+        )
+        if _existing_findings and is_identical:
+            _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
+            _logger.info(
+                "[ASSESSMENT] idempotent_assessment_reused scan_id=%s fingerprint=%s findings_count=%d overall_result=%s",
+                scan.id, curr_fingerprint[:12], len(_existing_findings), scan.overall_result
+            )
+            return _scan_out(db, scan)
 
-    if not _ASSESS_SEMAPHORE.acquire(timeout=_ASSESS_WAIT_S):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Assessment capacity busy; retry shortly",
-                            headers={"Retry-After": str(_ASSESS_WAIT_S)})
+    # Concurrent duplicate protection per scan ID
+    is_primary = False
+    in_flight_event = None
+    with _SCAN_IN_FLIGHT_LOCK:
+        if scan.id in _SCAN_IN_FLIGHT:
+            in_flight_event = _SCAN_IN_FLIGHT[scan.id]
+        else:
+            in_flight_event = threading.Event()
+            _SCAN_IN_FLIGHT[scan.id] = in_flight_event
+            is_primary = True
+
+    if not is_primary:
+        _logger.info(
+            "[ASSESSMENT] concurrent_assessment_detected scan_id=%s fingerprint=%s waiting_for_inflight",
+            scan.id, curr_fingerprint[:12]
+        )
+        finished = in_flight_event.wait(timeout=_ASSESS_WAIT_S)
+        if not finished:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Assessment capacity busy; concurrent request timed out",
+                headers={"Retry-After": str(_ASSESS_WAIT_S)},
+            )
+        db.refresh(scan)
+        _existing_findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        import hashlib as _hashlib
+        _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
+        _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
+        cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
+        is_identical = (cached_fp == curr_fingerprint) or (
+            bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) == _set_hash and scan.overall_result is not None
+        )
+        if _existing_findings and is_identical and not force:
+            _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
+            _logger.info(
+                "[ASSESSMENT] concurrent_duplicate_reused scan_id=%s fingerprint=%s findings_count=%d",
+                scan.id, curr_fingerprint[:12], len(_existing_findings)
+            )
+            return _scan_out(db, scan)
+
     try:
-        return _assess_inner(scan, user, db, force=force)
-    finally:
+        if not _ASSESS_SEMAPHORE.acquire(timeout=_ASSESS_WAIT_S):
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="Assessment capacity busy; retry shortly",
+                                headers={"Retry-After": str(_ASSESS_WAIT_S)})
         try:
-            _ASSESS_SEMAPHORE.release()
-        except Exception:
-            pass
+            return _assess_inner(scan, user, db, force=force, fingerprint=curr_fingerprint)
+        finally:
+            try:
+                _ASSESS_SEMAPHORE.release()
+            except Exception:
+                pass
+    finally:
+        if is_primary:
+            with _SCAN_IN_FLIGHT_LOCK:
+                _SCAN_IN_FLIGHT.pop(scan.id, None)
+            in_flight_event.set()
 
 
 @router.post("/batch-assess", response_model=BatchAssessResponse)
@@ -499,17 +586,22 @@ def assess_batch(
     return {"total": len(results), "results": [r.model_dump() for r in results]}
 
 
-def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False):
+def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fingerprint: str | None = None):
     import time
     import logging as _log
     from perf_baseline import record_assess_timing
     t_assess_start = time.perf_counter()
 
     assess_log = _log.getLogger("niyamnetra.assess")
-    _images_count = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).count()
+    _images = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
+    _images_count = len(_images)
+    if fingerprint is None:
+        fingerprint = compute_assessment_fingerprint(scan, _images)
+    assessment_id = f"assess-{scan.id}-{fingerprint[:8]}"
+
     assess_log.info(
-        "[ASSESSMENT] assessment_started inspection_id=%s scan_id=%s image_count=%d force=%s",
-        scan.inspection_id, scan.id, _images_count, force
+        "[ASSESSMENT] assessment_started assessment_id=%s inspection_id=%s scan_id=%s image_count=%d input_fingerprint=%s force=%s",
+        assessment_id, scan.inspection_id, scan.id, _images_count, fingerprint[:12], force
     )
 
     inspection = db.get(Inspection, scan.inspection_id)
@@ -526,9 +618,10 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False):
     t_rules_end = time.perf_counter()
 
     _rules_log = _log.getLogger("niyamnetra.rules")
+    _rules_dur = round((t_rules_end - t_rules_start) * 1000, 2)
     _rules_log.info(
-        "[RULES] rules_completed rule_pack_version=%s total_evaluated=%d passed=%d failed=%d not_assessed=%d overall_result=%s",
-        provenance.get("rule_pack_version", "2026.09.v1"), len(findings), verdict.passed, verdict.failed, verdict.not_assessed, verdict.overall_result
+        "[RULES] rules_completed rule_pack_version=%s applicable_count=%d evaluated_count=%d passed=%d failed=%d not_assessed=%d overall_result=%s duration_ms=%.2f",
+        provenance.get("rule_pack_version", "2026.09.v1"), verdict.checks_total, verdict.checks_assessed, verdict.passed, verdict.failed, verdict.not_assessed, verdict.overall_result, _rules_dur
     )
 
     # Persist OCR evidence on the scan (truncated 20k) + mean confidence so
@@ -585,12 +678,7 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False):
     from queries import resolve_duplicate
     scan.duplicate_of = resolve_duplicate(db, scan, inspection)
 
-    if not getattr(scan, "ocr_cache_hash", None):
-        import hashlib as _hashlib
-        _imgs = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
-        if _imgs:
-            _img_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
-            scan.ocr_cache_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_parts)).encode()).hexdigest()
+    _ASSESSMENT_FINGERPRINTS[scan.id] = fingerprint
 
     try:
         db.commit()
@@ -616,9 +704,10 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False):
     append_audit(db, inspection_id=scan.inspection_id, scan_id=scan.id,
                  user_id=user.id, action="assessed", new_value=verdict.overall_result)
 
+    _total_dur = round((t_assess_end - t_assess_start) * 1000, 2)
     assess_log.info(
-        "[ASSESSMENT] assessment_completed inspection_id=%s scan_id=%s overall_result=%s duration_ms=%.2f",
-        scan.inspection_id, scan.id, verdict.overall_result, round((t_assess_end - t_assess_start) * 1000, 2)
+        "[ASSESSMENT] assessment_completed assessment_id=%s inspection_id=%s scan_id=%s rule_pack_version=%s applicable_count=%d evaluated_count=%d overall_result=%s duration_ms=%.2f",
+        assessment_id, scan.inspection_id, scan.id, scan.rule_pack_version, verdict.checks_total, verdict.checks_assessed, verdict.overall_result, _total_dur
     )
 
     # Evidence retention (06 §9.5): images are kept for EVERY result.
@@ -669,20 +758,34 @@ def _scan_out(db: Session, scan: Scan) -> ScanOut:
     for img_out in out.images:
         img_out.url = f"/scans/{scan.id}/images/{img_out.id}"
         img_out.thumbnail_url = f"/scans/{scan.id}/images/{img_out.id}/thumbnail"
+    _fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
+    if not _fp:
+        _curr_imgs = getattr(scan, "images", None)
+        if _curr_imgs is None:
+            _curr_imgs = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
+        _fp = compute_assessment_fingerprint(scan, _curr_imgs)
+
     out.diagnostics = {
-        "assessment_id": f"assess-{scan.id}-{scan.rule_pack_version or '2026.09.v1'}",
-        "assessment_input_fingerprint": scan.ocr_cache_hash,
+        "assessment_id": f"assess-{scan.id}-{(_fp or '00000000')[:8]}",
+        "assessment_input_fingerprint": _fp,
         "ocr_provider": getattr(scan, "ocr_provider", None) or getattr(settings, "OCR_PROVIDER", "google_vision"),
         "ocr_status": "success" if scan.ocr_text else "no_text",
         "ocr_confidence_mean": scan.ocr_confidence_mean,
+        "ocr_lines_count": len(scan.ocr_text.splitlines()) if scan.ocr_text else 0,
+        "ocr_cache_hit": getattr(scan, "ocr_cache", None) is not None,
         "llm_provider": scan.llm_provider or getattr(settings, "LLM_PROVIDER", "groq"),
         "llm_model": scan.llm_model or getattr(settings, "GROQ_MODEL", "llama-3.3-70b-versatile"),
-        "llm_status": "success" if scan.llm_structured_data else "none",
+        "llm_status": "success" if scan.llm_structured_data else "fallback",
         "llm_duration_ms": scan.llm_duration_ms,
+        "llm_schema_valid": bool(scan.llm_structured_data),
+        "llm_cache_hit": getattr(scan, "llm_cache_hash", None) is not None,
         "rule_pack_version": scan.rule_pack_version or settings.RULE_PACK_VERSION,
         "catalog_rule_count": 26,
+        "executable_check_count": 19,
         "applicable_rule_count": scan.checks_total,
         "evaluated_rule_count": scan.checks_assessed,
+        "manual_review_rules": 7,
+        "rule_coverage_note": "26 catalog rules in 2026.09.v1; 19 executable algorithmic checks; 7 rules require manual review or specialized gazette schedules",
         "overall_result": scan.overall_result,
     }
     return out
@@ -1202,6 +1305,7 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
     _engines: list[str] = []
     _confs: list[float] = []
     _fail_reason: str | None = None
+    _ocr_results: list = []
 
     # --- OCR cache gate ---
     # Compute a fingerprint of the current image set. If it matches the last
@@ -1225,8 +1329,14 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
     if _cached_ocr is not None:
         # Cache hit: use persisted OcrLines, skip all cloud OCR calls.
         import logging as _log
-        _log.getLogger("niyamnetra.ocr_cache").debug(
-            "OCR cache hit for scan %s (hash=%s)", scan.id, _set_hash[:12]
+        _ocr_log = _log.getLogger("niyamnetra.ocr")
+        _line_cnt = len(_cached_ocr.lines)
+        _word_cnt = sum(len((l.text or "").split()) for l in _cached_ocr.lines)
+        _ocr_log.info(
+            "[OCR] ocr_completed provider=%s panel=all image_id=all input_artifact_type=cached status=success duration_ms=0.00 line_count=%d word_count=%d cache_hit=True",
+            getattr(_cached_ocr, "engine", "google_vision"),
+            _line_cnt,
+            _word_cnt,
         )
         ocr = _cached_ocr
     else:
@@ -1254,9 +1364,10 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
                 import logging as _log
                 _ocr_log = _log.getLogger("niyamnetra.ocr")
                 _ocr_t0 = time.perf_counter()
+                _prov = getattr(settings, "OCR_PROVIDER", "google_vision")
                 _ocr_log.info(
                     "[OCR] ocr_started provider=%s panel=%s image_id=%s input_artifact_type=%s",
-                    getattr(settings, "OCR_PROVIDER", "google_vision"),
+                    _prov,
                     _img_rec.panel,
                     _img_rec.id,
                     _atype,
@@ -1274,32 +1385,42 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
                 except Exception as _ocr_exc:
                     _ocr_dur = (time.perf_counter() - _ocr_t0) * 1000
                     _ocr_log.error(
-                        "[OCR] ocr_failed provider=%s failure_reason=%s duration_ms=%.2f",
-                        getattr(settings, "OCR_PROVIDER", "google_vision"),
-                        str(_ocr_exc),
+                        "[OCR] ocr_failed provider=%s panel=%s image_id=%s input_artifact_type=%s status=error duration_ms=%.2f failure_reason=%s cache_hit=False",
+                        _prov,
+                        _img_rec.panel,
+                        _img_rec.id,
+                        _atype,
                         _ocr_dur,
+                        str(_ocr_exc)[:200],
                     )
                     raise
 
                 _ocr_dur = (time.perf_counter() - _ocr_t0) * 1000
+                _line_cnt = len(getattr(_res, "lines", []) or [])
+                _word_cnt = sum(len((l.text or "").split()) for l in (getattr(_res, "lines", []) or []))
+                _stat = getattr(_res, "status", "success")
                 if getattr(_res, "failure_reason", None) and not getattr(_res, "lines", None):
                     _ocr_log.warning(
-                        "[OCR] ocr_failed provider=%s failure_reason=%s duration_ms=%.2f",
-                        getattr(_res, "engine", "unknown"),
-                        _res.failure_reason,
+                        "[OCR] ocr_failed provider=%s panel=%s image_id=%s input_artifact_type=%s status=%s duration_ms=%.2f failure_reason=%s cache_hit=False",
+                        getattr(_res, "engine", _prov),
+                        _img_rec.panel,
+                        _img_rec.id,
+                        _atype,
+                        _stat,
                         _ocr_dur,
+                        _res.failure_reason,
                     )
                 else:
-                    _line_cnt = len(getattr(_res, "lines", []) or [])
-                    _word_cnt = sum(len((l.text or "").split()) for l in (getattr(_res, "lines", []) or []))
                     _ocr_log.info(
-                        "[OCR] ocr_completed provider=%s status=%s duration_ms=%.2f line_count=%d word_count=%d mean_confidence=%.2f",
-                        getattr(_res, "engine", "unknown"),
-                        getattr(_res, "status", "success"),
+                        "[OCR] ocr_completed provider=%s panel=%s image_id=%s input_artifact_type=%s status=%s duration_ms=%.2f line_count=%d word_count=%d cache_hit=False",
+                        getattr(_res, "engine", _prov),
+                        _img_rec.panel,
+                        _img_rec.id,
+                        _atype,
+                        _stat,
                         _ocr_dur,
                         _line_cnt,
                         _word_cnt,
-                        float(getattr(_res, "mean_confidence", 0.0) or 0.0),
                     )
 
                 if getattr(_res, "panel", None) is None:
@@ -1405,21 +1526,26 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
             scan.llm_duration_ms = _llm_res.metadata.get("llm_duration_ms", _llm_dur)
             scan.llm_cache_hash = _llm_res.metadata.get("evidence_fingerprint")
             _extracted_cnt = sum(1 for v in ctx.fields.values() if getattr(v, "found", False))
+            _is_cache_hit = bool(_llm_res.metadata.get("cache_hit", False))
+            _is_fallback = bool(_llm_res.metadata.get("fallback_used", False))
             _llm_log.info(
-                "[LLM] llm_completed provider=%s model=%s status=%s duration_ms=%.2f schema_valid=True cache_hit=%s extracted_field_count=%d",
-                scan.llm_provider, scan.llm_model, _llm_res.metadata.get("status"),
-                _llm_dur, _llm_res.metadata.get("cache_hit", False), _extracted_cnt
+                "[LLM] llm_completed provider=%s model=%s inspection_id=%s scan_id=%s duration_ms=%.2f schema_valid=True cache_hit=%s fallback_used=%s extracted_field_count=%d",
+                scan.llm_provider, scan.llm_model, scan.inspection_id, scan.id,
+                _llm_dur, _is_cache_hit, _is_fallback, _extracted_cnt
             )
         else:
+            _err_reason = _llm_res.metadata.get("error") if _llm_res else "unsuccessful_status"
+            _is_fallback = bool(_llm_res.metadata.get("fallback_used", False)) if _llm_res else True
             _llm_log.warning(
-                "[LLM] llm_failed provider=%s model=%s failure_reason=%s fallback_used=True",
-                _llm_prov, _llm_mod, _llm_res.metadata.get("error") if _llm_res else "unsuccessful_status"
+                "[LLM] llm_failed provider=%s model=%s inspection_id=%s scan_id=%s duration_ms=%.2f schema_valid=False failure_reason=%s fallback_used=%s",
+                _llm_prov, _llm_mod, scan.inspection_id, scan.id, (time.perf_counter() - _llm_t0) * 1000, _err_reason, _is_fallback
             )
             ctx.fields = extract_fields(ocr)
     except Exception as _llm_err:
+        _llm_dur = (time.perf_counter() - _llm_t0) * 1000
         _llm_log.warning(
-            "[LLM] llm_failed provider=%s model=%s failure_reason=%s fallback_used=True",
-            _llm_prov, _llm_mod, str(_llm_err)
+            "[LLM] llm_failed provider=%s model=%s inspection_id=%s scan_id=%s duration_ms=%.2f schema_valid=False failure_reason=%s fallback_used=True",
+            _llm_prov, _llm_mod, scan.inspection_id, scan.id, _llm_dur, str(_llm_err)[:200]
         )
         ctx.fields = extract_fields(ocr)
 
