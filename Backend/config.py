@@ -142,7 +142,9 @@ class Settings(BaseSettings):
     # path is CLOUD OCR (zero RAM, only httpx): Google Vision (best accuracy,
     # Hindi + small fonts) first, OCR.space (free, no card) second, then local
     # Tesseract/Paddle only when present. See ocr_engine.run_ocr cascade.
-    OCR_PROVIDER: str = "auto"  # auto | google | ocrspace | tesseract | paddle
+    OCR_PROVIDER: str = "auto"  # auto | google | ocrspace | azure
+    OCR_PROVIDER_ORDER: str = "google_vision,ocr_space,azure"
+    OCR_PROVIDER_CHAIN: str = "google_vision,ocr_space,azure"
     OCR_LANGS: str = "en,hi"
     OCR_MIN_CONFIDENCE: float = 0.60
     TESSERACT_CMD: str | None = None

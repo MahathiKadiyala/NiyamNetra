@@ -21,6 +21,7 @@ STATUS_AUTH_ERROR = "OCR_AUTH_ERROR"
 STATUS_INVALID_RESPONSE = "OCR_INVALID_RESPONSE"
 STATUS_NO_TEXT = "OCR_NO_TEXT"
 STATUS_UNAVAILABLE = "OCR_UNAVAILABLE"
+STATUS_SKIPPED = "OCR_SKIPPED"
 
 
 @dataclass(slots=True)
@@ -72,6 +73,13 @@ class OcrResult:
     panel: str | None = None
     input_artifact_type: str = ""  # "rectified" or "analysis"
 
+    # Runtime fallback & diagnostics (Module 1)
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def diagnostic_trace(self) -> list[dict[str, Any]]:
+        return self.attempts
+
     @property
     def full_text(self) -> str:
         return "\n".join(l.text for l in self.lines)
@@ -81,6 +89,10 @@ class BaseOCRProvider(ABC):
     """Abstract base class for all cloud OCR providers."""
 
     name: str = "base"
+
+    def is_configured(self) -> bool:
+        """Return True if required API credentials / endpoints are configured."""
+        return True
 
     @abstractmethod
     def recognize(

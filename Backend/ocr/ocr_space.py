@@ -27,6 +27,7 @@ from ocr.base import (
     STATUS_TIMEOUT,
     STATUS_UNAVAILABLE,
 )
+from ocr.security import sanitize_sensitive_text
 
 
 class OCRSpaceProvider(BaseOCRProvider):
@@ -36,13 +37,16 @@ class OCRSpaceProvider(BaseOCRProvider):
         self,
         api_key: str | None = None,
         endpoint_url: str | None = None,
-        timeout_s: float = 15.0,
+        timeout_s: float | None = None,
     ):
         self.api_key = getattr(settings, "OCR_SPACE_API_KEY", None) if api_key is None else api_key
         self.endpoint_url = endpoint_url or getattr(
             settings, "OCR_SPACE_URL", "https://api.ocr.space/parse/image"
         )
-        self.timeout_s = timeout_s
+        self.timeout_s = timeout_s if timeout_s is not None else getattr(settings, "OCR_SPACE_TIMEOUT_S", 15.0)
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key and str(self.api_key).strip())
 
     def recognize(
         self,
@@ -52,7 +56,7 @@ class OCRSpaceProvider(BaseOCRProvider):
         options: dict[str, Any] | None = None,
     ) -> OcrResult:
         t0 = time.perf_counter()
-        if not self.api_key:
+        if not self.is_configured():
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
@@ -115,19 +119,21 @@ class OCRSpaceProvider(BaseOCRProvider):
                 status = STATUS_AUTH_ERROR
             elif code == 429:
                 status = STATUS_RATE_LIMITED
+            clean_msg = sanitize_sensitive_text(str(e))
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=status,
-                failure_reason=f"OCR.space HTTP {code}: {e}",
+                failure_reason=f"OCR.space HTTP {code}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
         except Exception as e:
+            clean_msg = sanitize_sensitive_text(str(e))
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=STATUS_PROVIDER_ERROR,
-                failure_reason=f"OCR.space error: {type(e).__name__}: {e}",
+                failure_reason=f"OCR.space error: {type(e).__name__}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
 

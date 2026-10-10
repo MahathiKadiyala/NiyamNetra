@@ -28,17 +28,21 @@ from ocr.base import (
     STATUS_TIMEOUT,
     STATUS_UNAVAILABLE,
 )
+from ocr.security import sanitize_sensitive_text
 
 
 class GoogleVisionProvider(BaseOCRProvider):
     name: str = "google_vision"
 
-    def __init__(self, api_key: str | None = None, endpoint_url: str | None = None, timeout_s: float = 12.0):
+    def __init__(self, api_key: str | None = None, endpoint_url: str | None = None, timeout_s: float | None = None):
         self.api_key = getattr(settings, "GOOGLE_VISION_API_KEY", None) if api_key is None else api_key
         self.endpoint_url = endpoint_url or getattr(
             settings, "GOOGLE_VISION_URL", "https://vision.googleapis.com/v1/images:annotate"
         )
-        self.timeout_s = timeout_s
+        self.timeout_s = timeout_s if timeout_s is not None else getattr(settings, "GOOGLE_VISION_TIMEOUT_S", 12.0)
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key and str(self.api_key).strip())
 
     def recognize(
         self,
@@ -48,7 +52,7 @@ class GoogleVisionProvider(BaseOCRProvider):
         options: dict[str, Any] | None = None,
     ) -> OcrResult:
         t0 = time.perf_counter()
-        if not self.api_key:
+        if not self.is_configured():
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
@@ -70,10 +74,12 @@ class GoogleVisionProvider(BaseOCRProvider):
 
         import httpx
 
+        headers = {"X-Goog-Api-Key": self.api_key}
+
         def _do_post():
             return httpx.post(
                 self.endpoint_url,
-                params={"key": self.api_key},
+                headers=headers,
                 json=payload,
                 timeout=self.timeout_s,
             )
@@ -105,19 +111,21 @@ class GoogleVisionProvider(BaseOCRProvider):
             elif code == 429:
                 status = STATUS_RATE_LIMITED
 
+            clean_msg = sanitize_sensitive_text(msg)
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=status,
-                failure_reason=f"Google Cloud Vision HTTP {code}: {msg}",
+                failure_reason=f"Google Cloud Vision HTTP {code}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
         except Exception as e:
+            clean_msg = sanitize_sensitive_text(str(e))
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=STATUS_PROVIDER_ERROR,
-                failure_reason=f"Google Cloud Vision connection error: {type(e).__name__}: {e}",
+                failure_reason=f"Google Cloud Vision connection error: {type(e).__name__}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
 

@@ -1345,7 +1345,7 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
         # THE ORIGINAL EVIDENCE FILE MUST NEVER BE SENT TO CLOUD OCR.
         # If derived artifact is missing, fail safely with STATUS_INPUT_UNAVAILABLE.
         from image_processor import get_ocr_input_artifact
-        from ocr.base import STATUS_INPUT_UNAVAILABLE, STATUS_NO_TEXT, STATUS_SUCCESS
+        from ocr.base import STATUS_INPUT_UNAVAILABLE, STATUS_NO_TEXT, STATUS_PROVIDER_ERROR, STATUS_SUCCESS
 
         _panel_jobs = []
         for _im in images:
@@ -1459,10 +1459,24 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
                 inspection_id=scan.inspection_id,
             )
         else:
-            _status = STATUS_NO_TEXT if _panel_jobs else STATUS_INPUT_UNAVAILABLE
+            _has_error = any(
+                getattr(r, "status", None) not in (STATUS_SUCCESS, STATUS_NO_TEXT)
+                for r in _ocr_results
+            )
+            if _has_error:
+                _err_r = next(
+                    (r for r in _ocr_results if getattr(r, "status", None) not in (STATUS_SUCCESS, STATUS_NO_TEXT)),
+                    None,
+                )
+                _status = getattr(_err_r, "status", STATUS_PROVIDER_ERROR)
+            elif _panel_jobs:
+                _status = STATUS_NO_TEXT
+            else:
+                _status = STATUS_INPUT_UNAVAILABLE
+
             ocr = OcrResult(
                 lines=[],
-                engine=_engines[0] if _engines else "none",
+                engine="none",
                 mean_confidence=None,
                 failure_reason=_fail_reason or "No text detected across panels",
                 status=_status,
@@ -1471,11 +1485,16 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
             )
 
         # Stage the cache on the scan instance; _assess_inner commits it.
+        # Hard invariant (Requirement 8): NEVER cache a failed provider result or empty extraction.
         try:
-            scan.ocr_cache_hash = _set_hash
-            _cached_blob = _lines_to_cache(ocr)
-            if _cached_blob:
-                scan.ocr_cache = _cached_blob
+            if ocr.status == STATUS_SUCCESS and ocr.lines:
+                _cached_blob = _lines_to_cache(ocr)
+                if _cached_blob:
+                    scan.ocr_cache_hash = _set_hash
+                    scan.ocr_cache = _cached_blob
+            else:
+                scan.ocr_cache_hash = None
+                scan.ocr_cache = None
         except Exception:
             pass
     t_ocr_end = time.perf_counter()
@@ -1604,6 +1623,7 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
         if ocr.full_text:
             scan.ocr_text = ocr.full_text[:20000]
         scan.ocr_confidence_mean = ocr.mean_confidence
+        scan.ocr_provider = ocr.engine if (ocr and ocr.engine != "none") else None
     except Exception:
         pass
 

@@ -12,20 +12,26 @@ from ocr.base import (
     STATUS_NO_TEXT,
     STATUS_PROVIDER_ERROR,
     STATUS_RATE_LIMITED,
+    STATUS_SKIPPED,
     STATUS_SUCCESS,
     STATUS_TIMEOUT,
     STATUS_UNAVAILABLE,
 )
-from ocr.factory import get_ocr_provider
+from ocr.fallback import FallbackOCRProvider
+from ocr.factory import get_candidate_providers, get_ocr_provider
 from ocr.google_vision import GoogleVisionProvider
 from ocr.ocr_space import OCRSpaceProvider
+from ocr.security import sanitize_sensitive_text
 
 __all__ = [
     "BaseOCRProvider",
     "GoogleVisionProvider",
     "OCRSpaceProvider",
     "AzureVisionProvider",
+    "FallbackOCRProvider",
     "get_ocr_provider",
+    "get_candidate_providers",
+    "sanitize_sensitive_text",
     "OcrLine",
     "OcrResult",
     "OcrBlock",
@@ -39,4 +45,5 @@ __all__ = [
     "STATUS_INVALID_RESPONSE",
     "STATUS_NO_TEXT",
     "STATUS_UNAVAILABLE",
+    "STATUS_SKIPPED",
 ]

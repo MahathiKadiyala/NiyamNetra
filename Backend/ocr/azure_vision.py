@@ -25,6 +25,7 @@ from ocr.base import (
     STATUS_TIMEOUT,
     STATUS_UNAVAILABLE,
 )
+from ocr.security import sanitize_sensitive_text
 
 
 class AzureVisionProvider(BaseOCRProvider):
@@ -34,11 +35,14 @@ class AzureVisionProvider(BaseOCRProvider):
         self,
         api_key: str | None = None,
         endpoint: str | None = None,
-        timeout_s: float = 15.0,
+        timeout_s: float | None = None,
     ):
         self.api_key = getattr(settings, "AZURE_VISION_KEY", None) if api_key is None else api_key
         self.endpoint = getattr(settings, "AZURE_VISION_ENDPOINT", None) if endpoint is None else endpoint
-        self.timeout_s = timeout_s
+        self.timeout_s = timeout_s if timeout_s is not None else getattr(settings, "AZURE_VISION_TIMEOUT_S", 15.0)
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key and str(self.api_key).strip() and self.endpoint and str(self.endpoint).strip())
 
     def recognize(
         self,
@@ -48,7 +52,7 @@ class AzureVisionProvider(BaseOCRProvider):
         options: dict[str, Any] | None = None,
     ) -> OcrResult:
         t0 = time.perf_counter()
-        if not self.api_key or not self.endpoint:
+        if not self.is_configured():
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
@@ -87,19 +91,21 @@ class AzureVisionProvider(BaseOCRProvider):
                 status = STATUS_AUTH_ERROR
             elif code == 429:
                 status = STATUS_RATE_LIMITED
+            clean_msg = sanitize_sensitive_text(str(e))
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=status,
-                failure_reason=f"Azure Vision HTTP {code}: {e}",
+                failure_reason=f"Azure Vision HTTP {code}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
         except Exception as e:
+            clean_msg = sanitize_sensitive_text(str(e))
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
                 status=STATUS_PROVIDER_ERROR,
-                failure_reason=f"Azure Vision connection error: {type(e).__name__}: {e}",
+                failure_reason=f"Azure Vision connection error: {type(e).__name__}: {clean_msg}",
                 duration_ms=round((time.perf_counter() - t0) * 1000, 2),
             )
 

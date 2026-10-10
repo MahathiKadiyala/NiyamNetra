@@ -475,7 +475,7 @@ def test_assessment_diagnostics_and_no_secrets_in_logs(env, caplog):
     assert data["diagnostics"]["catalog_rule_count"] == 26
     assert data["diagnostics"]["executable_check_count"] == 19
     assert data["diagnostics"]["manual_review_rules"] == 7
-    assert data["diagnostics"]["ocr_provider"] in ("google_vision", "mock", "azure_vision", "auto")
+    assert data["diagnostics"]["ocr_provider"] in ("google_vision", "mock", "azure_vision", "auto", "ocr_space")
     assert data["diagnostics"]["llm_provider"] in ("groq", "gemini", "mock")
 
     # Structured logs verification

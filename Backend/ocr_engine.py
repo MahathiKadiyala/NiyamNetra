@@ -111,6 +111,7 @@ def run_ocr(
     image_id: int | None = None,
     scan_id: int | None = None,
     inspection_id: int | None = None,
+    options: dict[str, Any] | None = None,
 ) -> OcrResult:
     """Cloud OCR entry point. Dispatches to configured Cloud OCR provider.
 
@@ -172,6 +173,7 @@ def run_ocr(
         image_bytes=img_bytes,
         image_width=w_px,
         image_height=h_px,
+        options=options,
     )
     if panel is not None:
         result.panel = panel
