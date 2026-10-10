@@ -81,10 +81,19 @@ def structure_inspection_ocr(
     results_list = [ocr_input] if isinstance(ocr_input, OcrResult) else ocr_input
     has_any_text = any(len(res.lines) > 0 for res in results_list)
     if not has_any_text:
+        _errs = [getattr(r, "failure_reason", None) for r in results_list if getattr(r, "failure_reason", None)]
+        _statuses = [getattr(r, "status", None) for r in results_list if getattr(r, "status", None)]
+        _is_fail = any(s in ("provider_error", "input_unavailable", "timeout") for s in _statuses) or bool(_errs)
+        _status = LLM_STATUS_FAILED if _is_fail else LLM_STATUS_SUCCESS
+        _evidence_st = "ocr_failed" if _is_fail else "no_readable_text"
+        _note = f"OCR provider failed: {_errs[0]}" if _errs else ("No text detected across any panel; all declarations not_observed.")
+
         return StructuredDeclarationResult(
             metadata={
-                "status": LLM_STATUS_SUCCESS,
-                "note": "No text detected across any panel; all declarations not_observed.",
+                "status": _status,
+                "evidence_status": _evidence_st,
+                "error": _errs[0] if _errs else None,
+                "note": _note,
                 "llm_prompt_version": PROMPT_VERSION,
                 "llm_schema_version": SCHEMA_VERSION,
                 "duration_ms": 0.0,

@@ -607,6 +607,17 @@ def evaluate_character_height(ctx: CheckContext) -> FindingResult:
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
+    front_failed = getattr(ctx, "panels_failed_ocr", {}).get("front") or getattr(ctx, "panels_failed_ocr", {}).get("principal")
+    if front_failed:
+        t.verdict = "not_assessed"
+        t.reason = f"Principal display panel OCR failed ({front_failed}); character height cannot be evaluated."
+        return t
+
     if getattr(ctx, "phase3_halted", False) or getattr(ctx, "is_medical_device", False):
         t.verdict = "not_assessed"
         t.reason = (
@@ -743,6 +754,17 @@ def evaluate_net_quantity_height(ctx: CheckContext) -> FindingResult:
     if getattr(ctx, "halted", None):
         t.verdict = "not_assessed"
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
+        return t
+
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
+    front_failed = getattr(ctx, "panels_failed_ocr", {}).get("front") or getattr(ctx, "panels_failed_ocr", {}).get("principal")
+    if front_failed:
+        t.verdict = "not_assessed"
+        t.reason = f"Principal display panel OCR failed ({front_failed}); net quantity height cannot be evaluated."
         return t
 
     if getattr(ctx, "phase3_halted", False) or getattr(ctx, "is_medical_device", False):
@@ -898,6 +920,11 @@ def evaluate_character_width(ctx: CheckContext) -> FindingResult:
     if getattr(ctx, "halted", None):
         t.verdict = "not_assessed"
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
+        return t
+
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
         return t
 
     if getattr(ctx, "phase3_halted", False) or getattr(ctx, "is_medical_device", False):
@@ -1113,6 +1140,11 @@ def evaluate_clear_space(ctx: CheckContext) -> FindingResult:
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
     if getattr(ctx, "phase3_halted", False) or getattr(ctx, "is_medical_device", False):
         t.verdict = "not_assessed"
         t.reason = "Not assessed: medical device, labelled under Medical Devices Rules 2017."
@@ -1254,6 +1286,11 @@ def evaluate_conspicuous_contrast(ctx: CheckContext) -> FindingResult:
     if getattr(ctx, "halted", None):
         t.verdict = "not_assessed"
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
+        return t
+
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
         return t
 
     if getattr(ctx, "phase3_halted", False) or getattr(ctx, "is_medical_device", False):

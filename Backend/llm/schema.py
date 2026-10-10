@@ -44,6 +44,7 @@ class FieldProvenance:
     ocr_confidence: float | None = None
     llm_confidence: float | None = None
     notes: str | None = None
+    source_type: str | None = None  # ocr | llm_extraction | image_evidence | operator_input | inspector_confirmation | ecommerce_listing
 
 
 @dataclass(slots=True)
@@ -161,6 +162,7 @@ class StructuredDeclarationResult:
                 ocr_confidence=p_data.get("ocr_confidence"),
                 llm_confidence=p_data.get("llm_confidence"),
                 notes=p_data.get("notes"),
+                source_type=p_data.get("source_type"),
             )
 
         def _make_candidates(cand_list: list) -> list[CandidateItem]:

@@ -1345,7 +1345,7 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
         # THE ORIGINAL EVIDENCE FILE MUST NEVER BE SENT TO CLOUD OCR.
         # If derived artifact is missing, fail safely with STATUS_INPUT_UNAVAILABLE.
         from image_processor import get_ocr_input_artifact
-        from ocr.base import STATUS_INPUT_UNAVAILABLE, STATUS_NO_TEXT, STATUS_PROVIDER_ERROR, STATUS_SUCCESS
+        from ocr.base import STATUS_INPUT_UNAVAILABLE, STATUS_NO_TEXT, STATUS_PROVIDER_ERROR, STATUS_SUCCESS, STATUS_TIMEOUT
 
         _panel_jobs = []
         for _im in images:
@@ -1508,10 +1508,33 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
         "ocr_ms": round((t_ocr_end - t_ocr_start) * 1000, 2),
     })
 
-    ctx.ocr_available = ocr.engine != "none"
+    if _cached_ocr is not None:
+        ctx.panels_with_ocr = set(ctx.panels_captured)
+        ctx.panel_ocr_results = {"cached": _cached_ocr}
+    else:
+        from ocr.base import STATUS_INPUT_UNAVAILABLE, STATUS_NO_TEXT, STATUS_PROVIDER_ERROR, STATUS_TIMEOUT
+        ctx.panel_ocr_results = {getattr(r, "panel", "front"): r for r in _ocr_results}
+        ctx.panels_with_ocr = {
+            getattr(r, "panel", "front")
+            for r in _ocr_results
+            if len(getattr(r, "lines", []) or []) > 0
+        }
+        ctx.panels_failed_ocr = {
+            getattr(r, "panel", "front"): (getattr(r, "failure_reason", None) or "OCR provider failed")
+            for r in _ocr_results
+            if getattr(r, "status", None) in (STATUS_PROVIDER_ERROR, STATUS_INPUT_UNAVAILABLE, STATUS_TIMEOUT)
+            or getattr(r, "failure_reason", None)
+        }
+        ctx.panels_empty_ocr = {
+            getattr(r, "panel", "front")
+            for r in _ocr_results
+            if len(getattr(r, "lines", []) or []) == 0 and getattr(r, "panel", "front") not in ctx.panels_failed_ocr
+        }
+
+    ctx.ocr_available = (ocr.engine != "none" and bool(ocr.lines))
     if not ctx.ocr_available:
         ctx.ocr_failure_reason = ocr.failure_reason
-    elif _fail_reason and not _all_lines:
+    elif _fail_reason and not ocr.lines:
         ctx.ocr_failure_reason = _fail_reason
     ctx.ocr_mean_confidence = ocr.mean_confidence
 

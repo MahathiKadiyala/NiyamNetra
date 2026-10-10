@@ -1137,6 +1137,8 @@ def aggregate_inspection_assessment(
 
     # 3. Assessment Completeness (Section 11)
     coverage_override = getattr(ctx, "coverage_sufficient", None)
+    if coverage_override is None and getattr(ctx, "ocr_failure_reason", None):
+        coverage_override = False
     completeness = determine_assessment_completeness(
         findings=deduped_findings,
         captured_panels=panels_set,

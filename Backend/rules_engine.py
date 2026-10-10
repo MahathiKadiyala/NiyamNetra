@@ -95,6 +95,10 @@ class CheckContext:
     clear_space_mm: dict = field(default_factory=dict)
     contrast_ratio: float | None = None
     llm_result: Any = None  # StructuredDeclarationResult (Phase 3)
+    panel_ocr_results: dict = field(default_factory=dict)
+    panels_with_ocr: set[str] = field(default_factory=set)
+    panels_failed_ocr: dict[str, str] = field(default_factory=dict)
+    panels_empty_ocr: set[str] = field(default_factory=set)
 
     # --- image quality ---
     image_usable: bool = True
@@ -209,8 +213,13 @@ def measurement_blocked(ctx: CheckContext) -> str | None:
     """Returns a reason if millimetre measurement is impossible, else None."""
     if not ctx.image_usable:
         return ctx.image_quality_reason
+    if getattr(ctx, "ocr_failure_reason", None):
+        return ctx.ocr_failure_reason
+    front_err = getattr(ctx, "panels_failed_ocr", {}).get("front") or getattr(ctx, "panels_failed_ocr", {}).get("principal")
+    if front_err:
+        return f"Principal display panel OCR failed: {front_err}"
     if not ctx.ocr_available:
-        return ctx.ocr_failure_reason or "No text was recognised on the panel."
+        return "No text was recognised on the panel."
     if ctx.mm_per_pixel is None or ctx.scale_source == "none":
         return NO_SCALE
     return None
@@ -779,6 +788,9 @@ def chk12_country_of_origin(ctx: CheckContext) -> FindingResult:
         return t
 
     coo = ctx.fields.get("country_of_origin")
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict, t.reason = "not_assessed", ctx.ocr_failure_reason
+        return t
     if not ctx.ocr_available:
         t.verdict, t.reason = "not_assessed", (
             ctx.ocr_failure_reason
@@ -787,6 +799,12 @@ def chk12_country_of_origin(ctx: CheckContext) -> FindingResult:
         )
         return t
     if coo is None or not coo.found:
+        from rules.evaluator import is_coverage_sufficient
+        if not is_coverage_sufficient(ctx, "country_of_origin"):
+            t.verdict, t.reason = "not_assessed", (
+                "Country of origin was not observed; inspection panel coverage is incomplete or unreadable."
+            )
+            return t
         t.verdict, t.limb = "fail", "36(1)"
         t.observed = "No country of origin declared on an imported package."
         t.required = "Imported packages must declare the country of origin."
@@ -827,12 +845,21 @@ def chk13_best_before(ctx: CheckContext) -> FindingResult:
         )
         return t
     bb = ctx.fields.get("best_before")
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict, t.reason = "not_assessed", ctx.ocr_failure_reason
+        return t
     if not ctx.ocr_available:
         t.verdict, t.reason = "not_assessed", (
             ctx.ocr_failure_reason or "The panel text could not be read."
         )
         return t
     if bb is None or not bb.found:
+        from rules.evaluator import is_coverage_sufficient
+        if not is_coverage_sufficient(ctx, "best_before"):
+            t.verdict, t.reason = "not_assessed", (
+                "Best-before date was not observed; inspection panel coverage is incomplete or unreadable."
+            )
+            return t
         t.verdict, t.limb = "fail", "36(1)"
         t.observed = "No best-before or use-by declaration on a perishable commodity."
         t.required = "Perishable commodities must declare a best-before or use-by date."
@@ -1462,11 +1489,17 @@ def derive_result(findings: list[FindingResult], ctx: CheckContext) -> ScanVerdi
         tier.severity = "critical"
         tier.observed = "No breach identified, so no response under Section 36 arises."
     else:
-        tier.reason = (
-            f"{na} of {len(assessable)} checks could not be assessed, so the "
-            f"graduated response under Section 36 cannot be settled on this "
-            f"evidence."
-        )
+        if getattr(ctx, "ocr_failure_reason", None):
+            tier.reason = (
+                f"Evidence processing failed ({ctx.ocr_failure_reason}); "
+                f"graduated response under Section 36 cannot be settled on unreadable evidence."
+            )
+        else:
+            tier.reason = (
+                f"{na} of {len(assessable)} checks could not be assessed, so the "
+                f"graduated response under Section 36 cannot be settled on this "
+                f"evidence."
+            )
 
     return ScanVerdict(
         overall_result=result,

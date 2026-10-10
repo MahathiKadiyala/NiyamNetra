@@ -53,22 +53,41 @@ def is_coverage_sufficient(ctx: Any, field_key: str) -> bool:
     if explicit is not None:
         return bool(explicit)
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        return False
+
+    failed_panels = set(getattr(ctx, "panels_failed_ocr", {}).keys())
+    empty_panels = set(getattr(ctx, "panels_empty_ocr", set()))
     panels = getattr(ctx, "panels_captured", set()) or set()
-    if len(panels) >= 2:
-        return True
+
+    if panels and panels.issubset(failed_panels | empty_panels):
+        return False
 
     # PDP-specific declarations (net quantity and commodity name are required on PDP under Rule 6(1) & Rule 7)
-    if field_key in ("net_quantity", "commodity_name") and ("front" in panels or "principal" in panels):
+    if field_key in ("net_quantity", "commodity_name"):
+        pdp_panels = {"front", "principal"} & panels
+        if not pdp_panels:
+            return False
+        if failed_panels and pdp_panels.issubset(failed_panels):
+            return False
+        if empty_panels and pdp_panels.issubset(empty_panels):
+            return False
         return True
 
     # Dedicated panels
     if field_key == "mrp" and "mrp" in panels:
-        return True
+        if "mrp" not in failed_panels and "mrp" not in empty_panels:
+            return True
     if field_key in ("date_of_manufacture", "best_before") and "batch" in panels:
-        return True
+        if "batch" not in failed_panels and "batch" not in empty_panels:
+            return True
 
     # Listing context always has complete listing metadata
     if getattr(ctx, "listing_available", False):
+        return True
+
+    usable_panels = panels - failed_panels - empty_panels
+    if len(usable_panels) >= 2:
         return True
 
     return False
@@ -87,7 +106,9 @@ def format_evidence_provenance(prov: FieldProvenance | None, extra: dict[str, An
     """Extract verifiable provenance payload without fabrication (Section 15 & 16)."""
     out: dict[str, Any] = {}
     if prov:
+        st = getattr(prov, "source_type", None) or ("ocr" if prov.source_text else "unknown")
         out = {
+            "source_type": st,
             "source_panel": prov.source_panel,
             "source_image_id": prov.source_image_id,
             "source_text": prov.source_text,
@@ -348,6 +369,11 @@ def evaluate_mrp_expression(
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
     mrp = llm_res.mrp
     t.evidence_provenance = format_evidence_provenance(mrp.provenance)
 
@@ -359,6 +385,21 @@ def evaluate_mrp_expression(
         return t
 
     if mrp.status in (STATUS_NOT_OBSERVED, STATUS_UNASSESSABLE) or mrp.value is None:
+        failed_panels = getattr(ctx, "panels_failed_ocr", {})
+        non_front = (getattr(ctx, "panels_captured", set()) or set()) - {"front", "principal"}
+        if failed_panels and ("mrp" in failed_panels or (non_front and non_front.issubset(set(failed_panels.keys())))):
+            err_p = "mrp" if "mrp" in failed_panels else next(iter(failed_panels.keys()))
+            t.verdict = "not_assessed"
+            t.reason = f"Retail sale price panel could not be read due to OCR failure on panel '{err_p}' ({failed_panels[err_p]}); cannot certify absence."
+            t.remediation = "Re-capture the panel displaying MRP."
+            return t
+
+        empty_panels = getattr(ctx, "panels_empty_ocr", set())
+        if empty_panels and ("mrp" in empty_panels or (non_front and non_front.issubset(empty_panels))):
+            t.verdict = "not_assessed"
+            t.reason = "No readable text detected on panel(s) where retail sale price is declared; cannot certify absence."
+            t.remediation = "Re-capture the panel displaying MRP with clear, legible text."
+            return t
         if is_coverage_sufficient(ctx, "mrp"):
             t.verdict = "fail"
             t.limb = "36(1)"
@@ -460,6 +501,11 @@ def evaluate_net_quantity_expression(
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
     nq = llm_res.net_quantity
     t.evidence_provenance = format_evidence_provenance(nq.provenance)
 
@@ -470,6 +516,21 @@ def evaluate_net_quantity_expression(
         return t
 
     if nq.status in (STATUS_NOT_OBSERVED, STATUS_UNASSESSABLE) or nq.value is None:
+        failed_panels = getattr(ctx, "panels_failed_ocr", {})
+        pdp_panels = ({"front", "principal"} & (getattr(ctx, "panels_captured", set()) or set())) or set()
+        if failed_panels and pdp_panels and pdp_panels.issubset(set(failed_panels.keys())):
+            err_p = failed_panels.get("front") or failed_panels.get("principal") or next(iter(failed_panels.values()))
+            t.verdict = "not_assessed"
+            t.reason = f"Principal display panel could not be read due to OCR failure ({err_p}); net quantity cannot be certified as absent."
+            t.remediation = "Re-capture the principal display panel."
+            return t
+
+        empty_panels = getattr(ctx, "panels_empty_ocr", set())
+        if empty_panels and pdp_panels and pdp_panels.issubset(empty_panels):
+            t.verdict = "not_assessed"
+            t.reason = "No readable text detected on principal display panel; net quantity cannot be certified as absent."
+            t.remediation = "Re-capture the principal display panel with clear, legible text."
+            return t
         if is_coverage_sufficient(ctx, "net_quantity"):
             t.verdict = "fail"
             t.limb = "36(2)"
@@ -569,6 +630,11 @@ def evaluate_country_of_origin_declaration(
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
     # Applicability check (Section 12)
     is_imported = getattr(ctx, "is_imported", None)
     if is_imported is None:
@@ -653,6 +719,11 @@ def evaluate_perishable_expiry_declaration(
     if getattr(ctx, "halted", None):
         t.verdict = "not_assessed"
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
+        return t
+
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
         return t
 
     is_perishable = getattr(ctx, "is_perishable", None)
@@ -803,6 +874,11 @@ def evaluate_unit_sale_price(
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
         return t
 
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
+        return t
+
     # Applicability check: USP is mandatory for packages containing > 1 unit, > 1 kg, or > 1 litre
     nq_val = getattr(ctx, "net_quantity_value", None)
     nq_unit = (getattr(ctx, "net_quantity_unit", None) or "").lower()
@@ -876,6 +952,11 @@ def evaluate_dimensions(
     if getattr(ctx, "halted", None):
         t.verdict = "not_assessed"
         t.reason = getattr(ctx, "halt_reason", "Assessment halted")
+        return t
+
+    if getattr(ctx, "ocr_failure_reason", None):
+        t.verdict = "not_assessed"
+        t.reason = ctx.ocr_failure_reason
         return t
 
     net_unit = (getattr(ctx, "net_quantity_unit", None) or "").lower()
