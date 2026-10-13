@@ -32,6 +32,7 @@ import { useSync } from '../../offline/SyncProvider';
 export default function InspectionReportScreen({
   inspectionId,
   onBack,
+  onResumeDraft,
   onOpenReviewDetail,
   onOpenRecapture,
 }) {
@@ -234,6 +235,33 @@ export default function InspectionReportScreen({
             {/* TAB 1: OVERVIEW & STATUTORY SUMMARY */}
             {activeTab === 'summary' && (
               <>
+                {(summary?.status === 'draft' || summary?.display_status === 'In Progress') && (
+                  <Card padding="md" style={{ marginBottom: spacing.md, backgroundColor: '#FFFBEB', borderColor: '#F59E0B', borderWidth: 1.5 }}>
+                    <View style={styles.rowBetween}>
+                      <View style={{ flex: 1, marginRight: spacing.sm }}>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: '#92400E' }}>
+                          📝 Draft Inspection Visit In Progress
+                        </Text>
+                        <Text style={{ fontSize: 11, color: '#B45309', marginTop: 2 }}>
+                          This inspection has not been submitted yet. You can resume scanning, review findings, and finalize the visit.
+                        </Text>
+                      </View>
+                      {onResumeDraft && (
+                        <Pressable
+                          onPress={() => onResumeDraft(inspectionId)}
+                          style={{
+                            backgroundColor: colors.netraTeal,
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderRadius: radius.sm,
+                          }}
+                        >
+                          <Text style={{ color: colors.white, fontSize: 12, fontWeight: '700' }}>Resume →</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  </Card>
+                )}
                 <Card padding="md" style={styles.summaryCard}>
                   <View style={styles.rowBetween}>
                     <View style={{ flex: 1 }}>

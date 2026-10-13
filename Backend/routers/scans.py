@@ -489,7 +489,7 @@ def assess_scan(
         _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         is_identical = False
-        if bool(_existing_findings) and scan.overall_result not in (None, "not_assessed"):
+        if bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) is not None:
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
             else:
@@ -536,7 +536,7 @@ def assess_scan(
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
         is_identical = False
-        if bool(_existing_findings) and scan.overall_result not in (None, "not_assessed"):
+        if bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) is not None:
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
             else:

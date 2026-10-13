@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, StyleSheet } from 'react-native';
+import { View, StyleSheet, Alert } from 'react-native';
 import HomeScreen from './HomeScreen';
 import NewInspectionScreen from './NewInspectionScreen';
 import InspectionSessionScreen from './InspectionSessionScreen';
@@ -9,6 +9,7 @@ import ReviewQueueScreen from './ReviewQueueScreen';
 import ReviewDetailScreen from './ReviewDetailScreen';
 import RecaptureTaskScreen from './RecaptureTaskScreen';
 import InspectionReportScreen from './InspectionReportScreen';
+import { fetchInspectionDetails } from '../../api/inspections';
 import { colors } from '../../theme';
 
 export default function InspectorFlow({ navigation }) {
@@ -34,7 +35,67 @@ export default function InspectorFlow({ navigation }) {
 
   const handleResumeInspection = () => {
     if (activeSession) setMode('session');
-    else setMode('new_inspection');
+    else setMode('home');
+  };
+
+  const handleResumeDraft = async (inspectionId) => {
+    if (!inspectionId) return;
+    try {
+      const details = await fetchInspectionDetails(inspectionId);
+      if (details?.status === 'draft') {
+        const reconstructedScans = (details.scans || []).map((s) => ({
+          id: s.id,
+          server_id: s.id,
+          commodity_generic: s.commodity_generic,
+          brand_name: s.brand_name,
+          batch_number: s.batch_number,
+          overall_result: s.overall_result || 'not_assessed',
+          checks_total: s.checks_total || 19,
+          checks_assessed: s.checks_assessed || 0,
+          findings: s.findings || [],
+          panelPhotos: (s.images || []).reduce((acc, img) => {
+            acc[img.panel] = `/scans/${s.id}/images/${img.id}`;
+            return acc;
+          }, {}),
+          panelEvidence: {},
+          files: (s.images || []).map((img) => ({
+            panel: img.panel,
+            uri: `/scans/${s.id}/images/${img.id}`,
+          })),
+          created_at: s.created_at,
+        }));
+
+        setActiveSession({
+          id: details.id,
+          serverInspectionId: details.id,
+          store: {
+            id: details.store_id,
+            name: details.store_name,
+            address: details.store_address,
+            city: details.store_city,
+            district: details.store_district,
+            state: details.store_state,
+            pincode: details.store_pincode,
+          },
+          transaction_type: details.transaction_type || 'retail_sale',
+          coords: {
+            latitude: details.latitude,
+            longitude: details.longitude,
+            accuracy: details.gps_accuracy_m,
+          },
+          started_at: details.local_created_at || details.inspection_date,
+          signature_status: details.signature_status || 'signed',
+          notes: details.notes || '',
+          scans: reconstructedScans,
+        });
+        setMode('session');
+      } else {
+        handleOpenInspectionReport(inspectionId);
+      }
+    } catch (err) {
+      console.warn('[InspectorFlow] Failed to resume draft:', err?.message || err);
+      Alert.alert('Resume Failed', 'Unable to load draft inspection details. Please check your connection.');
+    }
   };
 
   const handleOpenReviewQueue = () => {
@@ -142,6 +203,7 @@ export default function InspectorFlow({ navigation }) {
           activeInspection={activeSession}
           onStartInspection={handleStartInspection}
           onResumeInspection={handleResumeInspection}
+          onResumeDraft={handleResumeDraft}
           onOpenReviewQueue={handleOpenReviewQueue}
           onOpenReport={handleOpenInspectionReport}
         />
@@ -214,6 +276,7 @@ export default function InspectorFlow({ navigation }) {
         <InspectionReportScreen
           inspectionId={reportInspectionId}
           onBack={handleBackFromReport}
+          onResumeDraft={handleResumeDraft}
           onOpenReviewDetail={handleSelectReviewInspection}
           onOpenRecapture={handleOpenRecapture}
         />

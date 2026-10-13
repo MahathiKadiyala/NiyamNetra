@@ -19,7 +19,7 @@ import { fetchTodayStats, fetchInspectionsList, fetchPendingScans, assessScan } 
 import { fetchMe } from '../../api/admin';
 import { fetchReviewSummary } from '../../api/review';
 
-export default function HomeScreen({ navigation, onStartInspection, onResumeInspection, onOpenReviewQueue, onOpenReport, activeInspection }) {
+export default function HomeScreen({ navigation, onStartInspection, onResumeInspection, onResumeDraft, onOpenReviewQueue, onOpenReport, activeInspection }) {
   const [officer, setOfficer] = useState(null);
   const [todayStats, setTodayStats] = useState(null);
   const [reviewSummary, setReviewSummary] = useState(null);
@@ -153,40 +153,55 @@ export default function HomeScreen({ navigation, onStartInspection, onResumeInsp
           <RefreshControl refreshing={refreshing} onRefresh={() => loadData(true)} tintColor={colors.netraTeal} />
         }
       >
-        {/* Active Inspection Banner (if a visit is in progress) */}
-        {activeInspection && (
-          <Card
-            padding="md"
-            style={{
-              marginBottom: spacing.lg,
-              borderColor: colors.saffron,
-              borderWidth: 1.5,
-              backgroundColor: '#FFFDF7',
-            }}
-          >
-            <View style={styles.rowBetween}>
-              <View style={{ flex: 1 }}>
-                <View style={styles.rowAlign}>
-                  <Text style={styles.activePill}>ACTIVE VISIT IN PROGRESS</Text>
+        {/* Active Inspection Banner (if a visit or draft is in progress) */}
+        {(activeInspection || recentInspections.some((i) => i.status === 'draft')) && (() => {
+          const draftItem = activeInspection || recentInspections.find((i) => i.status === 'draft');
+          const storeName = draftItem.store?.name || draftItem.store_name || 'Inspection in progress';
+          const scanCount = draftItem.scans?.length ?? draftItem.scanned_count ?? draftItem.scan_count ?? 0;
+          const txType = draftItem.transaction_type || 'Retail Sale';
+
+          return (
+            <Card
+              padding="md"
+              style={{
+                marginBottom: spacing.lg,
+                borderColor: colors.saffron,
+                borderWidth: 1.5,
+                backgroundColor: '#FFFDF7',
+              }}
+            >
+              <View style={styles.rowBetween}>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.rowAlign}>
+                    <Text style={styles.activePill}>ACTIVE DRAFT VISIT IN PROGRESS</Text>
+                  </View>
+                  <Text style={[typography.h3, { marginTop: spacing.xs }]}>
+                    {storeName}
+                  </Text>
+                  <Text style={styles.captionText}>
+                    {scanCount} packages sampled • {txType}
+                  </Text>
                 </View>
-                <Text style={[typography.h3, { marginTop: spacing.xs }]}>
-                  {activeInspection.store?.name || 'Inspection in progress'}
-                </Text>
-                <Text style={styles.captionText}>
-                  {activeInspection.scans?.length || 0} packages sampled • {activeInspection.transaction_type}
-                </Text>
+                <Pressable
+                  onPress={() => {
+                    if (activeInspection) {
+                      onResumeInspection?.();
+                    } else if (draftItem.id && onResumeDraft) {
+                      onResumeDraft(draftItem.id);
+                    } else {
+                      onResumeInspection?.();
+                    }
+                  }}
+                  style={styles.resumeButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Resume active inspection draft"
+                >
+                  <Text style={styles.resumeButtonText}>Resume →</Text>
+                </Pressable>
               </View>
-              <Pressable
-                onPress={onResumeInspection}
-                style={styles.resumeButton}
-                accessibilityRole="button"
-                accessibilityLabel="Resume active inspection"
-              >
-                <Text style={styles.resumeButtonText}>Resume →</Text>
-              </Pressable>
-            </View>
-          </Card>
-        )}
+            </Card>
+          );
+        })()}
 
         {/* Primary Action Button */}
         <View style={{ marginBottom: spacing.lg }}>
@@ -381,7 +396,13 @@ export default function HomeScreen({ navigation, onStartInspection, onResumeInsp
             return (
               <Pressable
                 key={item.id || item.client_uuid}
-                onPress={() => item.id && onOpenReport && onOpenReport(item.id)}
+                onPress={() => {
+                  if (item.status === 'draft' && onResumeDraft && item.id) {
+                    onResumeDraft(item.id);
+                  } else if (item.id && onOpenReport) {
+                    onOpenReport(item.id);
+                  }
+                }}
               >
                 <Card padding="md" style={styles.inspectionCard}>
                   <View style={styles.rowBetween}>

@@ -40,6 +40,7 @@ export default function InspectionSummaryScreen({
   const [submitting, setSubmitting] = useState(false);
   const [submittedId, setSubmittedId] = useState(null);
   const [isLiveSubmitted, setIsLiveSubmitted] = useState(false);
+  const [submissionRecord, setSubmissionRecord] = useState(null);
 
   const packages = inspectionSession?.scans || [];
   const compliantCount = packages.filter((p) => p.overall_result === 'compliant').length;
@@ -83,20 +84,22 @@ export default function InspectionSummaryScreen({
       }
 
       // 2. Direct API submission if server inspection exists
+      let finalSubmissionRecord = null;
       if (currentServerId) {
         try {
-          await submitInspection(currentServerId, {
+          finalSubmissionRecord = await submitInspection(currentServerId, {
             signature_status: signatureStatus,
             notes: officerNotes || (isRefusal ? 'Merchant refused inspection access under Legal Metrology Act.' : null),
           });
           liveSubmitted = true;
           setIsLiveSubmitted(true);
+          setSubmissionRecord(finalSubmissionRecord);
         } catch (subErr) {
           console.warn('[Summary] Live submit failed, enqueuing for sync:', subErr?.message || subErr);
         }
       }
 
-      // 2. Enqueue to storage. If live submission already succeeded, mark is_synced: true
+      // 3. Enqueue to storage. If live submission already succeeded, mark is_synced: true
       // so SyncProvider does not submit a duplicate inspection to the server.
       const localId = await enqueueInspection({
         store_id: Number(inspectionSession.store.id),
@@ -127,7 +130,7 @@ export default function InspectionSummaryScreen({
           is_perishable: p.is_perishable,
           has_sticker: p.has_sticker,
         })),
-        result: overallInspectionVerdict,
+        result: finalSubmissionRecord?.overall_result || overallInspectionVerdict,
       });
 
       setSubmittedId(
@@ -143,6 +146,13 @@ export default function InspectionSummaryScreen({
   };
 
   if (submittedId) {
+    const finalVerdict = isRefusal ? 'violation' : (submissionRecord?.overall_result || overallInspectionVerdict);
+    const summaryData = submissionRecord?.finalization_summary;
+    const evaluatedCount = summaryData?.scans_evaluated?.length || 0;
+    const reusedCount = summaryData?.scans_reused?.length || 0;
+    const pendingEvidenceCount = summaryData?.scans_pending_evidence?.length || 0;
+    const failedAssessmentCount = summaryData?.scans_failed?.length || 0;
+
     return (
       <View style={styles.container}>
         <Header title="Inspection Finalized" subtitle="Official Record Stored" />
@@ -172,17 +182,53 @@ export default function InspectionSummaryScreen({
             </View>
             <View style={[styles.rowBetween, { marginTop: 8 }]}>
               <Text style={styles.summaryLabel}>Packages Assessed:</Text>
-              <Text style={styles.summaryValue}>{packages.length}</Text>
+              <Text style={styles.summaryValue}>
+                {summaryData
+                  ? `${evaluatedCount + reusedCount} of ${summaryData.total_scans ?? packages.length}`
+                  : packages.length}
+              </Text>
             </View>
+            {summaryData && (
+              <View style={[styles.rowBetween, { marginTop: 8 }]}>
+                <Text style={styles.summaryLabel}>Evaluation Detail:</Text>
+                <Text style={[styles.summaryValue, { fontSize: 11 }]}>
+                  {`${evaluatedCount} evaluated • ${reusedCount} reused`}
+                </Text>
+              </View>
+            )}
             <View style={[styles.rowBetween, { marginTop: 8 }]}>
               <Text style={styles.summaryLabel}>Rule Result:</Text>
-              <VerdictBadge result={isRefusal ? 'violation' : overallInspectionVerdict} />
+              <VerdictBadge result={finalVerdict} />
             </View>
             <View style={[styles.rowBetween, { marginTop: 8 }]}>
               <Text style={styles.summaryLabel}>Merchant Signature:</Text>
               <Text style={styles.summaryValue}>{signatureStatus.toUpperCase()}</Text>
             </View>
           </Card>
+
+          {/* Pending Evidence notice */}
+          {pendingEvidenceCount > 0 && (
+            <View style={{ backgroundColor: '#FEF3C7', borderColor: '#F59E0B', borderWidth: 1, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md, width: '100%' }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: '#92400E' }}>
+                ⚠️ Evidence Notice: {pendingEvidenceCount} package(s) lacked required panel evidence.
+              </Text>
+              <Text style={{ fontSize: 11, color: '#B45309', marginTop: 2 }}>
+                These items are preserved as not assessed and routed to the Officer Review Queue.
+              </Text>
+            </View>
+          )}
+
+          {/* Technical failure notice */}
+          {failedAssessmentCount > 0 && (
+            <View style={{ backgroundColor: '#FEE2E2', borderColor: '#EF4444', borderWidth: 1, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md, width: '100%' }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: '#B91C1C' }}>
+                ⚠️ Provider Notice: Technical evaluation failed for {failedAssessmentCount} package(s).
+              </Text>
+              <Text style={{ fontSize: 11, color: '#7F1D1D', marginTop: 2 }}>
+                No false violations were manufactured. These packages remain available for retry in the Review Queue.
+              </Text>
+            </View>
+          )}
 
           <PrimaryButton
             title="Return to Inspector Dashboard"
@@ -359,7 +405,7 @@ export default function InspectionSummaryScreen({
         {/* Submit Actions */}
         <View style={{ gap: spacing.sm, marginBottom: spacing.xxl }}>
           <PrimaryButton
-            title={submitting ? 'Submitting & Sealing…' : '✓ Seal & Submit Official Inspection Record'}
+            title={submitting ? 'Evaluating Scans & Sealing…' : '✓ Seal & Submit Official Inspection Record'}
             onPress={handleSubmit}
             disabled={submitting}
           />

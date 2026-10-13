@@ -29,6 +29,8 @@ router = APIRouter(tags=["inspections"])
 import threading as _threading
 _STORE_LOCK = _threading.Lock()
 _STORE_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
+_INSPECTION_SUBMIT_IN_FLIGHT: dict[int, _threading.Event] = {}
+_INSPECTION_SUBMIT_LOCK = _threading.Lock()
 
 # Transaction types that put a package inside Chapter II's retail-sale ambit.
 # The authoritative, per-package scope test is CHK03 in the engine; this is the
@@ -704,18 +706,229 @@ def submit_inspection(body: SubmitInspectionRequest,
                       insp: Inspection = Depends(owned_inspection),
                       user: User = Depends(get_current_user),
                       db: Session = Depends(get_db)):
+    """Finalize and submit the inspection.
+
+    Evaluates any unassessed eligible scans or scans with updated evidence
+    through the authoritative rules engine before freezing the inspection.
+    Reuses existing fresh assessments when the evidence fingerprint is unchanged.
+    Safe to retry: double-clicking or retrying returns the persisted record.
+    """
+    import logging as _log
+    import hashlib as _hashlib
+    from models import Finding, ScanImage
+    from routers.scans import (
+        _assess_inner,
+        compute_assessment_fingerprint,
+        _ASSESSMENT_FINGERPRINTS,
+        _OCR_CACHE_SALT,
+        _ASSESS_SEMAPHORE,
+        _ASSESS_WAIT_S,
+    )
+    _logger = _log.getLogger("niyamnetra.inspections")
+
+    # Fast idempotency: if already submitted, return existing persisted inspection
     if insp.status == "submitted":
-        raise HTTPException(status.HTTP_409_CONFLICT, detail="Already submitted")
-    insp.status = "submitted"
-    insp.signature_status = body.signature_status
-    if body.notes:
-        insp.notes = body.notes
-    insp.submitted_at = datetime.now(timezone.utc)
-    db.commit()
-    append_audit(db, inspection_id=insp.id, user_id=user.id,
-                 action="inspection_submitted", old_value="draft",
-                 new_value="submitted", reason=body.notes)
-    return _inspection_dict(insp)
+        _logger.info(
+            "[INSPECTION] submit_retry_detected inspection_id=%s user_id=%s already_submitted=True",
+            insp.id, user.id
+        )
+        out = _inspection_dict(insp)
+        out["finalization_summary"] = {
+            "status": "already_submitted",
+            "message": "Inspection already submitted; returning persisted record.",
+            "total_scans": len(getattr(insp, "scans", []) or []),
+            "scans_evaluated": [],
+            "scans_reused": [s.id for s in (getattr(insp, "scans", []) or [])],
+            "scans_pending_evidence": [],
+            "scans_failed": [],
+            "scans_blocked": [],
+        }
+        return out
+
+    # Concurrency control per inspection ID in current process
+    is_primary = False
+    in_flight_event = None
+    with _INSPECTION_SUBMIT_LOCK:
+        if insp.id in _INSPECTION_SUBMIT_IN_FLIGHT:
+            in_flight_event = _INSPECTION_SUBMIT_IN_FLIGHT[insp.id]
+        else:
+            in_flight_event = _threading.Event()
+            _INSPECTION_SUBMIT_IN_FLIGHT[insp.id] = in_flight_event
+            is_primary = True
+
+    if not is_primary:
+        _logger.info(
+            "[INSPECTION] concurrent_submit_detected inspection_id=%s user_id=%s waiting_for_inflight",
+            insp.id, user.id
+        )
+        finished = in_flight_event.wait(timeout=_ASSESS_WAIT_S + 10)
+        db.refresh(insp)
+        if insp.status == "submitted":
+            out = _inspection_dict(insp)
+            out["finalization_summary"] = {
+                "status": "already_submitted",
+                "message": "Inspection finalized concurrently; returning persisted record.",
+                "total_scans": len(getattr(insp, "scans", []) or []),
+                "scans_evaluated": [],
+                "scans_reused": [s.id for s in (getattr(insp, "scans", []) or [])],
+                "scans_pending_evidence": [],
+                "scans_failed": [],
+                "scans_blocked": [],
+            }
+            return out
+
+    try:
+        # Re-check status inside primary block
+        db.refresh(insp)
+        if insp.status == "submitted":
+            out = _inspection_dict(insp)
+            out["finalization_summary"] = {
+                "status": "already_submitted",
+                "message": "Inspection already submitted; returning persisted record.",
+                "total_scans": len(getattr(insp, "scans", []) or []),
+                "scans_evaluated": [],
+                "scans_reused": [s.id for s in (getattr(insp, "scans", []) or [])],
+                "scans_pending_evidence": [],
+                "scans_failed": [],
+                "scans_blocked": [],
+            }
+            return out
+
+        # Retrieve live scans under this inspection
+        live_scans = [s for s in (insp.scans or []) if getattr(s, "duplicate_of", None) is None]
+        scans_evaluated: list[int] = []
+        scans_reused: list[int] = []
+        scans_pending_evidence: list[int] = []
+        scans_failed: list[int] = []
+        scans_blocked: list[int] = []
+        scan_details: list[dict] = []
+
+        for s in live_scans:
+            images = db.query(ScanImage).filter(ScanImage.scan_id == s.id).all()
+            if not images:
+                scans_pending_evidence.append(s.id)
+                scan_details.append({
+                    "scan_id": s.id,
+                    "status": "pending_evidence",
+                    "overall_result": s.overall_result or "not_assessed",
+                    "reason": "No panel images uploaded for this package",
+                })
+                continue
+
+            curr_fingerprint = compute_assessment_fingerprint(s, images)
+            existing_findings = db.query(Finding).filter(Finding.scan_id == s.id).all()
+            cached_fp = _ASSESSMENT_FINGERPRINTS.get(s.id)
+            img_set_parts = sorted(f"{im.panel}:{im.sha256}" for im in images)
+            set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(img_set_parts)).encode()).hexdigest()
+
+            is_identical = False
+            if bool(existing_findings) and getattr(s, "ocr_cache_hash", None) is not None:
+                if cached_fp is not None:
+                    is_identical = (cached_fp == curr_fingerprint)
+                else:
+                    rp = getattr(s, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+                    is_identical = (
+                        getattr(s, "ocr_cache_hash", None) == set_hash
+                        and getattr(s, "rule_pack_version", None) == rp
+                    )
+
+            if existing_findings and is_identical:
+                _ASSESSMENT_FINGERPRINTS[s.id] = curr_fingerprint
+                scans_reused.append(s.id)
+                scan_details.append({
+                    "scan_id": s.id,
+                    "status": "reused",
+                    "overall_result": s.overall_result,
+                    "checks_assessed": s.checks_assessed,
+                    "checks_total": s.checks_total,
+                    "reason": "Existing assessment valid and current",
+                })
+                _logger.info(
+                    "[INSPECTION_FINALIZE] scan_assessment_reused inspection_id=%s scan_id=%s fingerprint=%s result=%s",
+                    insp.id, s.id, curr_fingerprint[:12], s.overall_result
+                )
+            else:
+                # Requires fresh evaluation
+                acquired = _ASSESS_SEMAPHORE.acquire(timeout=_ASSESS_WAIT_S)
+                if not acquired:
+                    scans_blocked.append(s.id)
+                    scan_details.append({
+                        "scan_id": s.id,
+                        "status": "capacity_busy",
+                        "overall_result": s.overall_result or "not_assessed",
+                        "reason": "Assessment capacity busy; queued for retry",
+                    })
+                    _logger.warning(
+                        "[INSPECTION_FINALIZE] scan_assessment_blocked_capacity inspection_id=%s scan_id=%s",
+                        insp.id, s.id
+                    )
+                    continue
+                try:
+                    _out = _assess_inner(s, user, db, force=False, fingerprint=curr_fingerprint)
+                    scans_evaluated.append(s.id)
+                    scan_details.append({
+                        "scan_id": s.id,
+                        "status": "assessed",
+                        "overall_result": s.overall_result,
+                        "checks_assessed": s.checks_assessed,
+                        "checks_total": s.checks_total,
+                    })
+                    _logger.info(
+                        "[INSPECTION_FINALIZE] scan_assessment_completed inspection_id=%s scan_id=%s result=%s assessed=%d total=%d",
+                        insp.id, s.id, s.overall_result, s.checks_assessed, s.checks_total
+                    )
+                except Exception as exc:
+                    _logger.error(
+                        "[INSPECTION_FINALIZE] scan_assessment_error inspection_id=%s scan_id=%s error=%s",
+                        insp.id, s.id, exc
+                    )
+                    scans_failed.append(s.id)
+                    scan_details.append({
+                        "scan_id": s.id,
+                        "status": "error",
+                        "overall_result": s.overall_result or "not_assessed",
+                        "reason": str(exc)[:200],
+                    })
+                finally:
+                    try:
+                        _ASSESS_SEMAPHORE.release()
+                    except Exception:
+                        pass
+
+        # Finalize inspection lifecycle state
+        insp.status = "submitted"
+        insp.signature_status = body.signature_status
+        if body.notes:
+            insp.notes = body.notes
+        insp.submitted_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(insp)
+
+        append_audit(db, inspection_id=insp.id, user_id=user.id,
+                     action="inspection_submitted", old_value="draft",
+                     new_value="submitted", reason=body.notes)
+
+        out = _inspection_dict(insp)
+        out["finalization_summary"] = {
+            "status": "submitted",
+            "total_scans": len(live_scans),
+            "scans_evaluated": scans_evaluated,
+            "scans_reused": scans_reused,
+            "scans_pending_evidence": scans_pending_evidence,
+            "scans_failed": scans_failed,
+            "scans_blocked": scans_blocked,
+            "violations_count": sum(1 for s in live_scans if s.overall_result == "violation"),
+            "compliant_count": sum(1 for s in live_scans if s.overall_result == "compliant"),
+            "not_assessed_count": sum(1 for s in live_scans if s.overall_result in (None, "not_assessed")),
+            "details": scan_details,
+        }
+        return out
+    finally:
+        if is_primary:
+            with _INSPECTION_SUBMIT_LOCK:
+                _INSPECTION_SUBMIT_IN_FLIGHT.pop(insp.id, None)
+            in_flight_event.set()
+
 
 
 @router.patch("/inspections/{inspection_id}")
