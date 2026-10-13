@@ -151,9 +151,9 @@ class Scan(Base):
     recommended_action: Mapped[str | None] = mapped_column(String(40))
 
     # --- denominator, so a partial scan can never read as a clean one (C4/C5) ---
-    # 18 assessable checks (CHK18 is the derived Section-36 tier, not an assessed
-    # check), so a package scan honestly reports "16 of 18"; C5.
-    checks_total: Mapped[int] = mapped_column(Integer, default=18)
+    # 19 algorithmic checks registered in the engine (all 19 unique checks returned
+    # in an assessment collection, including CHK18 Section 36 graduated penalty tier).
+    checks_total: Mapped[int] = mapped_column(Integer, default=19)
     checks_assessed: Mapped[int] = mapped_column(Integer, default=0)
 
     # --- panel geometry, Rule 7(4) ---

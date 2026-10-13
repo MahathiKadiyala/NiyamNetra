@@ -719,11 +719,11 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
               {reassessing ? (
                 <View style={styles.rowAlign}>
                   <ActivityIndicator color={colors.white} size="small" style={{ marginRight: 8 }} />
-                  <Text style={styles.reassessBtnText}>Evaluating {findings.length || 26} Statutory Checks with OCR & LLM…</Text>
+                  <Text style={styles.reassessBtnText}>Evaluating {findings.length || 19} Statutory Checks with OCR & LLM…</Text>
                 </View>
               ) : (
                 <Text style={styles.reassessBtnText}>
-                  ⚡ Run Server Assessment ({findings.length || 26} Statutory Checks) →
+                  ⚡ Run Server Assessment ({findings.length || 19} Statutory Checks) →
                 </Text>
               )}
             </Pressable>

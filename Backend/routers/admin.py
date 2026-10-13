@@ -530,6 +530,8 @@ def override_finding(
                 scan.overall_result = "compliant"
             else:
                 scan.overall_result = "not_assessed"
+            scan.checks_total = len(_rows)
+            scan.checks_assessed = sum(1 for v in _eff if v in ("pass", "fail"))
             db.commit()
         except IntegrityError:
             db.rollback()

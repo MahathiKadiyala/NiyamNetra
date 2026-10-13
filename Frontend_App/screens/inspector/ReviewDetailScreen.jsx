@@ -290,7 +290,7 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
           <View style={[styles.rowBetween, { marginTop: spacing.sm, paddingTop: spacing.xs, borderTopWidth: 1, borderTopColor: colors.borderLight }]}>
             <Text style={styles.metaLabel}>Rule-Pack: <Text style={styles.metaValue}>2026.09.v1</Text></Text>
             <Text style={styles.metaLabel}>
-              Completeness: <Text style={styles.metaValue}>{assessment?.completeness || `${scanReviews[0]?.checks_assessed || 0}/${scanReviews[0]?.checks_total || 18}`}</Text>
+              Completeness: <Text style={styles.metaValue}>{assessment?.completeness || `${scanReviews[0]?.checks_assessed || 0}/${scanReviews[0]?.checks_total || 19}`}</Text>
             </Text>
           </View>
         </Card>

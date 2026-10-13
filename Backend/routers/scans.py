@@ -727,6 +727,17 @@ def _scan_out(db: Session, scan: Scan) -> ScanOut:
     )
     out = ScanOut.model_validate(scan)
     out.counts = counts
+    out.checks_total = counts.total
+    out.checks_assessed = counts.passed + counts.failed
+
+    if scan.checks_total != counts.total or scan.checks_assessed != (counts.passed + counts.failed):
+        scan.checks_total = counts.total
+        scan.checks_assessed = counts.passed + counts.failed
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
     out.batch_number = scan.batch_number
     out.net_quantity_value = scan.net_quantity_value
     out.net_quantity_unit = scan.net_quantity_unit
@@ -782,8 +793,8 @@ def _scan_out(db: Session, scan: Scan) -> ScanOut:
         "rule_pack_version": scan.rule_pack_version or settings.RULE_PACK_VERSION,
         "catalog_rule_count": 26,
         "executable_check_count": 19,
-        "applicable_rule_count": scan.checks_total,
-        "evaluated_rule_count": scan.checks_assessed,
+        "applicable_rule_count": out.checks_total,
+        "evaluated_rule_count": out.checks_assessed,
         "manual_review_rules": 7,
         "rule_coverage_note": "26 catalog rules in 2026.09.v1; 19 executable algorithmic checks; 7 rules require manual review or specialized gazette schedules",
         "overall_result": scan.overall_result,

@@ -1448,9 +1448,9 @@ class ScanVerdict:
 def derive_result(findings: list[FindingResult], ctx: CheckContext) -> ScanVerdict:
     """Four states, derived from nineteen three-state findings."""
     assessable = [f for f in findings if f.check_id != "CHK18"]
-    passed = sum(1 for f in assessable if f.verdict == "pass")
-    failed = sum(1 for f in assessable if f.verdict == "fail")
-    na = sum(1 for f in assessable if f.verdict == "not_assessed")
+    assessable_passed = sum(1 for f in assessable if f.verdict == "pass")
+    assessable_failed = sum(1 for f in assessable if f.verdict == "fail")
+    assessable_na = sum(1 for f in assessable if f.verdict == "not_assessed")
 
     limbs = {f.limb for f in assessable if f.verdict == "fail" and f.limb}
     limb = (
@@ -1463,12 +1463,12 @@ def derive_result(findings: list[FindingResult], ctx: CheckContext) -> ScanVerdi
         result, action = "out_of_scope", None
     elif ctx.halted == "CHK02":
         result, action = "out_of_scope", None
-    elif failed:
+    elif assessable_failed:
         result = "violation"
         action = _graduated_action(assessable, limb)
-    elif na and passed == 0:
+    elif assessable_na and assessable_passed == 0:
         result, action = "not_assessed", "recapture_required"
-    elif na:
+    elif assessable_na:
         # Some checks passed and some could not be assessed. This is NOT a
         # clean result and must never be reported as one.
         result, action = "not_assessed", "human_review"
@@ -1476,37 +1476,49 @@ def derive_result(findings: list[FindingResult], ctx: CheckContext) -> ScanVerdi
         result, action = "compliant", None
 
     # CHK18 is filled in here, where the whole picture is visible.
-    tier = next(f for f in findings if f.check_id == "CHK18")
-    if result == "violation":
-        tier.verdict, tier.reason = "fail", None
-        tier.severity = "critical"
-        tier.observed = _tier_description(assessable, limb)
-        tier.limb = "36(2)" if "36(2)" in limbs else ("36(1)" if "36(1)" in limbs else None)
-    elif result == "out_of_scope":
-        tier.reason = ctx.halt_reason
-    elif result == "compliant":
-        tier.verdict, tier.reason = "pass", None
-        tier.severity = "critical"
-        tier.observed = "No breach identified, so no response under Section 36 arises."
-    else:
-        if getattr(ctx, "ocr_failure_reason", None):
-            tier.reason = (
-                f"Evidence processing failed ({ctx.ocr_failure_reason}); "
-                f"graduated response under Section 36 cannot be settled on unreadable evidence."
-            )
+    tier = next((f for f in findings if f.check_id == "CHK18"), None)
+    if tier is not None:
+        if result == "violation":
+            tier.verdict, tier.reason = "fail", None
+            tier.severity = "critical"
+            tier.observed = _tier_description(assessable, limb)
+            tier.limb = "36(2)" if "36(2)" in limbs else ("36(1)" if "36(1)" in limbs else None)
+        elif result == "out_of_scope":
+            tier.verdict, tier.reason = "not_assessed", ctx.halt_reason
+        elif result == "compliant":
+            tier.verdict, tier.reason = "pass", None
+            tier.severity = "critical"
+            tier.observed = "No breach identified, so no response under Section 36 arises."
         else:
-            tier.reason = (
-                f"{na} of {len(assessable)} checks could not be assessed, so the "
-                f"graduated response under Section 36 cannot be settled on this "
-                f"evidence."
-            )
+            tier.verdict = "not_assessed"
+            if getattr(ctx, "ocr_failure_reason", None):
+                tier.reason = (
+                    f"Evidence processing failed ({ctx.ocr_failure_reason}); "
+                    f"graduated response under Section 36 cannot be settled on unreadable evidence."
+                )
+            else:
+                tier.reason = (
+                    f"{assessable_na} of {len(assessable)} checks could not be assessed, so the "
+                    f"graduated response under Section 36 cannot be settled on this "
+                    f"evidence."
+                )
+
+    # Authority: compute authoritative counters across the entire collection of returned findings.
+    # Invariants enforced:
+    #   passed + failed + not_assessed == total_findings == checks_total
+    #   checks_assessed == passed + failed
+    total_findings = len(findings)
+    passed = sum(1 for f in findings if f.verdict == "pass")
+    failed = sum(1 for f in findings if f.verdict == "fail")
+    na = sum(1 for f in findings if f.verdict == "not_assessed")
+    checks_assessed = passed + failed
 
     return ScanVerdict(
         overall_result=result,
         violation_limb=limb,
         recommended_action=action,
-        checks_total=len(assessable),          # 18 — CHK18 is the derived tier, not an assessed check (C5)
-        checks_assessed=len(assessable) - na,  # e.g. 16 of 18 on a package scan with no web listing
+        checks_total=total_findings,
+        checks_assessed=checks_assessed,
         passed=passed,
         failed=failed,
         not_assessed=na,

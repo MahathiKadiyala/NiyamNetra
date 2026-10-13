@@ -426,7 +426,7 @@ export default function InspectionSessionScreen({
           overall_result: assessedScan.overall_result,
           violation_limb: assessedScan.violation_limb,
           checks_assessed: assessedScan.checks_assessed,
-          checks_total: assessedScan.checks_total || 26,
+          checks_total: assessedScan.checks_total || (Array.isArray(assessedScan.findings) ? assessedScan.findings.length : 19),
           findings: assessedScan.findings,
           created_at: assessedScan.created_at || new Date().toISOString(),
         };
@@ -465,7 +465,7 @@ export default function InspectionSessionScreen({
           has_sticker: hasSticker,
           overall_result: 'not_assessed',
           checks_assessed: 0,
-          checks_total: 26,
+          checks_total: 19,
           findings: offlineFindings,
           is_offline: true,
           created_at: new Date().toISOString(),
@@ -609,7 +609,7 @@ export default function InspectionSessionScreen({
               const bName = (pkg.brand_name && !pkg.brand_name.toLowerCase().includes('unspecified')) ? pkg.brand_name.trim() : null;
               const cName = (pkg.commodity_generic && !pkg.commodity_generic.toLowerCase().includes('unspecified')) ? pkg.commodity_generic.trim() : null;
               const pkgTitle = bName && cName ? `${bName} — ${cName}` : (cName || (bName ? `${bName} • Commodity not determined` : 'Commodity not determined'));
-              const checksCount = pkg.checks_total || (Array.isArray(pkg.findings) ? pkg.findings.length : 26);
+              const checksCount = pkg.checks_total || (Array.isArray(pkg.findings) ? pkg.findings.length : 19);
 
               return (
                 <Card key={pkg.id || idx} padding="sm" style={styles.packageCard}>

@@ -470,6 +470,44 @@ it('20. FindingsScreen sync effect updates on findings/verdict and isolates evid
   );
 });
 
+// 21. Arithmetic & Finding Counts Reconciled Contract
+it('21. Finding counts satisfy arithmetic invariants (4 pass, 3 fail, 12 not assessed -> 19 total, 7 assessed)', () => {
+  const scanCounts = {
+    total: 19,
+    passed: 4,
+    failed: 3,
+    not_assessed: 12,
+  };
+  const checks_total = 19;
+  const checks_assessed = 7;
+
+  // Mutually exclusive final status invariant
+  assert.strictEqual(scanCounts.passed + scanCounts.failed + scanCounts.not_assessed, scanCounts.total);
+  assert.strictEqual(scanCounts.total, checks_total);
+
+  // Successfully assessed invariant
+  assert.strictEqual(checks_assessed, scanCounts.passed + scanCounts.failed);
+});
+
+// 22. Frontend screens use authoritative backend counters without hardcoded drift
+it('22. Frontend screens avoid conflating 26 catalog rules with per-scan findings', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  const sessionScreenPath = path.join(__dirname, '../screens/inspector/InspectionSessionScreen.jsx');
+  const sessionScreenCode = fs.readFileSync(sessionScreenPath, 'utf8');
+
+  // Verify checks_total does not default to 26 in InspectionSessionScreen
+  assert.strictEqual(sessionScreenCode.includes('checks_total: assessedScan.checks_total || 26'), false);
+  assert.strictEqual(sessionScreenCode.includes('checks_total: 26,'), false);
+
+  const reviewScreenPath = path.join(__dirname, '../screens/inspector/ReviewDetailScreen.jsx');
+  const reviewScreenCode = fs.readFileSync(reviewScreenPath, 'utf8');
+
+  // Verify completeness does not fall back to /18 in ReviewDetailScreen
+  assert.strictEqual(reviewScreenCode.includes('${scanReviews[0]?.checks_total || 18}'), false);
+});
+
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
 

@@ -290,16 +290,15 @@ def test_findings_breakdown_and_verdict_consistency():
     total_findings = len(findings)
     assert total_findings == 19
 
-    assessable = [f for f in findings if f.check_id != "CHK18"]
-    p_cnt = sum(1 for f in assessable if f.verdict == "pass")
-    f_cnt = sum(1 for f in assessable if f.verdict == "fail")
-    na_cnt = sum(1 for f in assessable if f.verdict == "not_assessed")
+    p_cnt = sum(1 for f in findings if f.verdict == "pass")
+    f_cnt = sum(1 for f in findings if f.verdict == "fail")
+    na_cnt = sum(1 for f in findings if f.verdict == "not_assessed")
 
-    assert verdict.checks_total == 18
+    assert verdict.checks_total == 19
     assert verdict.passed == p_cnt
     assert verdict.failed == f_cnt
     assert verdict.not_assessed == na_cnt
-    assert p_cnt + f_cnt + na_cnt == 18
+    assert p_cnt + f_cnt + na_cnt == 19
     assert verdict.checks_assessed == p_cnt + f_cnt
 
 

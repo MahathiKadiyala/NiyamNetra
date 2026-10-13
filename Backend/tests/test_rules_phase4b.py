@@ -817,7 +817,7 @@ class TestEngineIntegration:
         )
         findings, verdict, provenance = assess(ctx)
         assert provenance["rule_pack_version"] == "2026.07.v1"
-        assert verdict.checks_total == 18
+        assert verdict.checks_total == 19
         assert isinstance(findings, list)
 
 
