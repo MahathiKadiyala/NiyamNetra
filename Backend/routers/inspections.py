@@ -701,8 +701,203 @@ def add_finding_remark(
     }
 
 
+def _acquire_submit_claim(
+    db: Session,
+    inspection_id: int,
+    user_id: int,
+    lease_seconds: int = 60,
+    wait_seconds: float = 6.0,
+) -> tuple[bool, str, dict | None, str]:
+    """Atomically acquire or reclaim database-level finalization lease.
+
+    Guarantees cross-worker idempotency:
+    1. Uses IdempotencyKey PK constraint for atomic lease creation across workers/processes.
+    2. Uses optimistic concurrency (compare-and-swap) for expired lease reclamation.
+    3. If held by another active worker, polls up to wait_seconds for completion.
+    4. If completed, returns (False, '', cached_dict, 'completed').
+    5. If still in-flight after wait, returns (False, '', None, 'in_progress').
+    """
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+    from models import IdempotencyKey, utcnow
+    from sqlalchemy.exc import IntegrityError
+
+    claim_key = f"submit_claim_insp_{inspection_id}"
+    now = utcnow()
+    my_token = _uuid.uuid4().hex
+    expires_at = now + timedelta(seconds=lease_seconds)
+
+    # 1. Check existing claim
+    claim = db.get(IdempotencyKey, claim_key)
+
+    if claim is None:
+        payload = {
+            "owner_token": my_token,
+            "claimed_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+        }
+        new_row = IdempotencyKey(
+            key=claim_key,
+            user_id=user_id,
+            fingerprint=f"finalize:{inspection_id}",
+            status_code=102,  # HTTP 102 Processing (In-flight lease)
+            response_body=_json.dumps(payload),
+            created_at=now,
+        )
+        try:
+            db.add(new_row)
+            db.commit()
+            return True, my_token, None, "acquired"
+        except IntegrityError:
+            db.rollback()
+            # Race condition: another worker inserted simultaneously
+            claim = db.get(IdempotencyKey, claim_key)
+
+    if claim is not None:
+        # Check if already completed
+        if claim.status_code == 200:
+            try:
+                cached = _json.loads(claim.response_body)
+                if isinstance(cached, dict):
+                    return False, "", cached, "completed"
+            except Exception:
+                pass
+            return False, "", None, "completed"
+
+        # Claim is in-flight (status_code == 102)
+        try:
+            body = _json.loads(claim.response_body)
+            claim_exp = datetime.fromisoformat(body["expires_at"])
+            if claim_exp.tzinfo is None:
+                claim_exp = claim_exp.replace(tzinfo=timezone.utc)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+        except Exception:
+            claim_exp = now - timedelta(seconds=1)
+
+        if now < claim_exp:
+            # Active lease held by another worker. Wait/poll for completion.
+            deadline = _time.perf_counter() + wait_seconds
+            while _time.perf_counter() < deadline:
+                _time.sleep(0.4)
+                db.expire_all()
+                claim = db.get(IdempotencyKey, claim_key)
+                if claim and claim.status_code == 200:
+                    try:
+                        cached = _json.loads(claim.response_body)
+                        if isinstance(cached, dict):
+                            return False, "", cached, "completed"
+                    except Exception:
+                        pass
+                    return False, "", None, "completed"
+                # Check if expired while polling
+                now_poll = utcnow()
+                if now_poll.tzinfo is None:
+                    now_poll = now_poll.replace(tzinfo=timezone.utc)
+                if claim and claim.status_code == 102:
+                    try:
+                        poll_exp = datetime.fromisoformat(_json.loads(claim.response_body)["expires_at"])
+                        if poll_exp.tzinfo is None:
+                            poll_exp = poll_exp.replace(tzinfo=timezone.utc)
+                        if now_poll >= poll_exp:
+                            break  # Expired while waiting; break to reclaim below
+                    except Exception:
+                        break
+
+            # Re-read claim after polling
+            db.expire_all()
+            claim = db.get(IdempotencyKey, claim_key)
+            if claim and claim.status_code == 200:
+                try:
+                    cached = _json.loads(claim.response_body)
+                    if isinstance(cached, dict):
+                        return False, "", cached, "completed"
+                except Exception:
+                    pass
+                return False, "", None, "completed"
+
+            # If still active and not expired, report in_progress
+            now_check = utcnow()
+            if now_check.tzinfo is None:
+                now_check = now_check.replace(tzinfo=timezone.utc)
+            try:
+                cur_exp = datetime.fromisoformat(_json.loads(claim.response_body)["expires_at"]) if claim else now_check
+                if cur_exp.tzinfo is None:
+                    cur_exp = cur_exp.replace(tzinfo=timezone.utc)
+                if now_check < cur_exp:
+                    return False, "", None, "in_progress"
+            except Exception:
+                pass
+
+        # Lease has expired (crashed/abandoned worker)! Reclaim lease via optimistic compare-and-swap
+        now_rec = utcnow()
+        rec_exp = now_rec + timedelta(seconds=lease_seconds)
+        rec_payload = {
+            "owner_token": my_token,
+            "claimed_at": now_rec.isoformat(),
+            "expires_at": rec_exp.isoformat(),
+            "reclaimed_at": now_rec.isoformat(),
+        }
+        updated = db.query(IdempotencyKey).filter(
+            IdempotencyKey.key == claim_key,
+            IdempotencyKey.status_code == 102,
+            IdempotencyKey.response_body == claim.response_body,
+        ).update({
+            IdempotencyKey.user_id: user_id,
+            IdempotencyKey.response_body: _json.dumps(rec_payload),
+            IdempotencyKey.created_at: now_rec,
+        })
+        db.commit()
+        if updated == 1:
+            return True, my_token, None, "reclaimed"
+
+        # If another worker reclaimed first, re-check
+        claim = db.get(IdempotencyKey, claim_key)
+        if claim and claim.status_code == 200:
+            try:
+                return False, "", _json.loads(claim.response_body), "completed"
+            except Exception:
+                return False, "", None, "completed"
+        return False, "", None, "in_progress"
+
+
+def _release_or_complete_submit_claim(
+    db: Session,
+    claim_key: str,
+    owner_token: str,
+    success: bool,
+    response_payload: dict | None = None,
+) -> bool:
+    """Verifies ownership and either commits completed response or releases lease."""
+    import json as _json
+    from models import IdempotencyKey
+    try:
+        claim = db.get(IdempotencyKey, claim_key)
+        if claim is None or claim.status_code != 102:
+            return False
+        body = _json.loads(claim.response_body)
+        if body.get("owner_token") != owner_token:
+            return False
+
+        if success:
+            claim.status_code = 200
+            claim.response_body = _json.dumps(response_payload or {}, default=str)
+            db.commit()
+            return True
+        else:
+            db.delete(claim)
+            db.commit()
+            return True
+    except Exception:
+        db.rollback()
+        return False
+
+
 @router.post("/inspections/{inspection_id}/submit")
 def submit_inspection(body: SubmitInspectionRequest,
+                      request: Request,
                       insp: Inspection = Depends(owned_inspection),
                       user: User = Depends(get_current_user),
                       db: Session = Depends(get_db)):
@@ -712,6 +907,7 @@ def submit_inspection(body: SubmitInspectionRequest,
     through the authoritative rules engine before freezing the inspection.
     Reuses existing fresh assessments when the evidence fingerprint is unchanged.
     Safe to retry: double-clicking or retrying returns the persisted record.
+    Database-backed claim guarantees cross-worker idempotency and crash recovery.
     """
     import logging as _log
     import hashlib as _hashlib
@@ -724,6 +920,7 @@ def submit_inspection(body: SubmitInspectionRequest,
         _ASSESS_SEMAPHORE,
         _ASSESS_WAIT_S,
     )
+    from idempotency import close_idempotent, idempotency_key
     _logger = _log.getLogger("niyamnetra.inspections")
 
     # Fast idempotency: if already submitted, return existing persisted inspection
@@ -743,9 +940,12 @@ def submit_inspection(body: SubmitInspectionRequest,
             "scans_failed": [],
             "scans_blocked": [],
         }
+        client_k = idempotency_key(request)
+        if client_k:
+            close_idempotent(db, request, user.id, client_k, 200, out)
         return out
 
-    # Concurrency control per inspection ID in current process
+    # Process-local concurrency control per inspection ID
     is_primary = False
     in_flight_event = None
     with _INSPECTION_SUBMIT_LOCK:
@@ -775,7 +975,14 @@ def submit_inspection(body: SubmitInspectionRequest,
                 "scans_failed": [],
                 "scans_blocked": [],
             }
+            client_k = idempotency_key(request)
+            if client_k:
+                close_idempotent(db, request, user.id, client_k, 200, out)
             return out
+
+    claim_key = f"submit_claim_insp_{insp.id}"
+    owner_token = None
+    completed = False
 
     try:
         # Re-check status inside primary block
@@ -788,6 +995,45 @@ def submit_inspection(body: SubmitInspectionRequest,
                 "total_scans": len(getattr(insp, "scans", []) or []),
                 "scans_evaluated": [],
                 "scans_reused": [s.id for s in (getattr(insp, "scans", []) or [])],
+                "scans_pending_evidence": [],
+                "scans_failed": [],
+                "scans_blocked": [],
+            }
+            return out
+
+        # Database-level atomic lease acquisition across workers/processes
+        is_owner, owner_token, cached_resp, claim_status = _acquire_submit_claim(
+            db, insp.id, user.id, lease_seconds=60, wait_seconds=min(8.0, _ASSESS_WAIT_S)
+        )
+
+        if not is_owner:
+            if claim_status == "completed" and cached_resp:
+                client_k = idempotency_key(request)
+                if client_k:
+                    close_idempotent(db, request, user.id, client_k, 200, cached_resp)
+                return cached_resp
+            db.refresh(insp)
+            if insp.status == "submitted":
+                out = _inspection_dict(insp)
+                out["finalization_summary"] = {
+                    "status": "already_submitted",
+                    "message": "Inspection finalized concurrently; returning persisted record.",
+                    "total_scans": len(getattr(insp, "scans", []) or []),
+                    "scans_evaluated": [],
+                    "scans_reused": [s.id for s in (getattr(insp, "scans", []) or [])],
+                    "scans_pending_evidence": [],
+                    "scans_failed": [],
+                    "scans_blocked": [],
+                }
+                return out
+            # Still in-progress by another worker (Requirement 5)
+            out = _inspection_dict(insp)
+            out["finalization_summary"] = {
+                "status": "in_progress",
+                "message": "Inspection finalization is currently in progress by another worker. Please retry shortly.",
+                "total_scans": len(getattr(insp, "scans", []) or []),
+                "scans_evaluated": [],
+                "scans_reused": [],
                 "scans_pending_evidence": [],
                 "scans_failed": [],
                 "scans_blocked": [],
@@ -901,12 +1147,6 @@ def submit_inspection(body: SubmitInspectionRequest,
         if body.notes:
             insp.notes = body.notes
         insp.submitted_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(insp)
-
-        append_audit(db, inspection_id=insp.id, user_id=user.id,
-                     action="inspection_submitted", old_value="draft",
-                     new_value="submitted", reason=body.notes)
 
         out = _inspection_dict(insp)
         out["finalization_summary"] = {
@@ -922,8 +1162,36 @@ def submit_inspection(body: SubmitInspectionRequest,
             "not_assessed_count": sum(1 for s in live_scans if s.overall_result in (None, "not_assessed")),
             "details": scan_details,
         }
+
+        # Verify lease ownership in DB before freezing
+        lease_valid = _release_or_complete_submit_claim(
+            db, claim_key, owner_token, success=True, response_payload=out
+        )
+        if not lease_valid:
+            _logger.warning(
+                "[INSPECTION] lease_invalid_at_commit inspection_id=%s token=%s (superseded)",
+                insp.id, owner_token
+            )
+            db.rollback()
+            db.refresh(insp)
+            return _inspection_dict(insp)
+
+        completed = True
+        db.commit()
+        db.refresh(insp)
+
+        append_audit(db, inspection_id=insp.id, user_id=user.id,
+                     action="inspection_submitted", old_value="draft",
+                     new_value="submitted", reason=body.notes)
+
+        client_k = idempotency_key(request)
+        if client_k:
+            close_idempotent(db, request, user.id, client_k, 200, out)
+
         return out
     finally:
+        if owner_token and not completed:
+            _release_or_complete_submit_claim(db, claim_key, owner_token, success=False)
         if is_primary:
             with _INSPECTION_SUBMIT_LOCK:
                 _INSPECTION_SUBMIT_IN_FLIGHT.pop(insp.id, None)
