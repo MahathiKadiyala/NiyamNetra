@@ -54,8 +54,10 @@ def compute_assessment_fingerprint(scan: Scan, images: list[ScanImage]) -> str:
     - ordered image identities, panels, and SHA-256 hashes
     - rule pack version
     - LLM prompt & schema versions
+    - non-secret OCR and LLM provider configuration identities
     - declared statutory scope & geometry inputs
-    Does NOT depend only on scan_id and does NOT include random timestamps."""
+    - listing URL and commodity metadata
+    Does NOT depend only on scan_id and does NOT include random timestamps or secrets."""
     import hashlib
     from datetime import date
     from llm.prompts import PROMPT_VERSION, SCHEMA_VERSION
@@ -66,16 +68,27 @@ def compute_assessment_fingerprint(scan: Scan, images: list[ScanImage]) -> str:
         else:
             rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
     scale_src = getattr(scan, "scale_source", None) or "declared"
+    ocr_prov = getattr(settings, "OCR_PROVIDER", "google_vision")
+    ocr_chain = getattr(settings, "OCR_PROVIDER_CHAIN", "")
+    llm_prov = getattr(settings, "LLM_PROVIDER", "groq")
+    llm_mod = getattr(settings, "GROQ_MODEL", "")
+    listing = getattr(scan, "listing_url", None) or ""
+
     parts = [
         f"rp:{rp}",
         f"pv:{PROMPT_VERSION}",
         f"sv:{SCHEMA_VERSION}",
+        f"ocr_cfg:{ocr_prov}:{ocr_chain}",
+        f"llm_cfg:{llm_prov}:{llm_mod}",
+        f"listing:{listing}",
         f"scope:{scan.is_imported}:{scan.is_perishable}:{scan.is_medical_device}:{scan.is_tobacco}:{scan.has_sticker}:{scan.sticker_reduces_price}:{scan.sticker_covers_original}",
         f"geom:{scan.panel_shape}:{scan.panel_height_mm}:{scan.panel_width_mm}:{scan.panel_diameter_mm}:{scan.total_surface_area_cm2}:{scan.is_blown_moulded}:{scale_src}",
     ]
     img_parts = sorted(f"{getattr(im, 'id', 0)}:{im.panel}:{im.sha256}" for im in images)
     parts.append("imgs:" + "|".join(img_parts))
     return hashlib.sha256(";".join(parts).encode("utf-8")).hexdigest()
+
+
 
 
 def _label_for(line) -> str | None:
@@ -313,12 +326,24 @@ async def upload_image(
                 rectified_file_path=None,
             )
             db.add(img)
-            # Invalidate any cached assessment on scan since image set has changed
+            # Invalidate any cached assessment stages on scan since image set has changed
             scan.ocr_cache_hash = None
             scan.ocr_cache = None
+            scan.ocr_text = None
+            scan.ocr_confidence_mean = None
             scan.llm_cache_hash = None
             scan.llm_structured_data = None
             _ASSESSMENT_FINGERPRINTS.pop(scan.id, None)
+
+            # Freshness contract: clear old assessment findings and reset verdict
+            _old_findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+            if _old_findings:
+                for _f in _old_findings:
+                    db.delete(_f)
+                scan.overall_result = "not_assessed"
+                scan.checks_assessed = 0
+                scan.violation_limb = None
+                scan.recommended_action = None
             db.commit()
             break
         except IntegrityError:
@@ -463,9 +488,16 @@ def assess_scan(
         import hashlib as _hashlib
         _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
-        is_identical = (cached_fp == curr_fingerprint) or (
-            bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) == _set_hash and scan.overall_result is not None
-        )
+        is_identical = False
+        if bool(_existing_findings) and scan.overall_result not in (None, "not_assessed"):
+            if cached_fp is not None:
+                is_identical = (cached_fp == curr_fingerprint)
+            else:
+                rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+                is_identical = (
+                    getattr(scan, "ocr_cache_hash", None) == _set_hash
+                    and getattr(scan, "rule_pack_version", None) == rp
+                )
         if _existing_findings and is_identical:
             _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
             _logger.info(
@@ -503,9 +535,16 @@ def assess_scan(
         _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
-        is_identical = (cached_fp == curr_fingerprint) or (
-            bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) == _set_hash and scan.overall_result is not None
-        )
+        is_identical = False
+        if bool(_existing_findings) and scan.overall_result not in (None, "not_assessed"):
+            if cached_fp is not None:
+                is_identical = (cached_fp == curr_fingerprint)
+            else:
+                rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+                is_identical = (
+                    getattr(scan, "ocr_cache_hash", None) == _set_hash
+                    and getattr(scan, "rule_pack_version", None) == rp
+                )
         if _existing_findings and is_identical and not force:
             _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
             _logger.info(
@@ -1033,7 +1072,9 @@ def update_scan(body: UpdateScanRequest, scan: Scan = Depends(owned_scan), user:
                          reason=f"inputs changed: {sorted(_keys)}")
     except IntegrityError:
         db.rollback()
+    _ASSESSMENT_FINGERPRINTS.pop(scan.id, None)
     db.refresh(scan)
+
     append_audit(db, inspection_id=scan.inspection_id, scan_id=scan.id, user_id=user.id, action="scan_updated", new_value=str(sorted(_keys.keys())))
     return {"scan_id": scan.id, "updated": sorted(_keys.keys())}
 
@@ -1088,14 +1129,24 @@ def attach_listing(body: ListingRequest, scan: Scan = Depends(owned_scan), user:
     except Exception:
         pass
     try:
+        _old_findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        if _old_findings:
+            for _f in _old_findings:
+                db.delete(_f)
+            scan.overall_result = "not_assessed"
+            scan.checks_assessed = 0
+            scan.violation_limb = None
+            scan.recommended_action = None
         db.commit()
     except Exception:
         db.rollback()
+    _ASSESSMENT_FINGERPRINTS.pop(scan.id, None)
     # Keep ocr_text for OCR only; do NOT append raw HTML. Record the URL +
     # a truncated marker in audit for traceability.
     marker = f"[LISTING {url[:200]} len={len(html)}]"
     append_audit(db, inspection_id=scan.inspection_id, scan_id=scan.id, user_id=user.id, action="listing_attached", new_value=f"{url[:200]} {marker}")
     return {"scan_id": scan.id, "listing_url": url, "fetched_chars": len(html)}
+
 
 # ---------------------------------------------------------------------------
 # OCR result cache helpers
@@ -1587,6 +1638,8 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
                 _llm_dur, _is_cache_hit, _is_fallback, _extracted_cnt
             )
         else:
+            scan.llm_structured_data = None
+            scan.llm_cache_hash = None
             _err_reason = _llm_res.metadata.get("error") if _llm_res else "unsuccessful_status"
             _is_fallback = bool(_llm_res.metadata.get("fallback_used", False)) if _llm_res else True
             _llm_log.warning(
@@ -1595,12 +1648,15 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
             )
             ctx.fields = extract_fields(ocr)
     except Exception as _llm_err:
+        scan.llm_structured_data = None
+        scan.llm_cache_hash = None
         _llm_dur = (time.perf_counter() - _llm_t0) * 1000
         _llm_log.warning(
             "[LLM] llm_failed provider=%s model=%s inspection_id=%s scan_id=%s duration_ms=%.2f schema_valid=False failure_reason=%s fallback_used=True",
             _llm_prov, _llm_mod, scan.inspection_id, scan.id, _llm_dur, str(_llm_err)[:200]
         )
         ctx.fields = extract_fields(ocr)
+
 
     # Populate scan metadata from extracted fields if missing / placeholder
     _comm_val = ctx.fields.get("commodity")

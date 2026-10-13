@@ -910,7 +910,9 @@ def prepare_derived_analysis_image(original_path: Path, bgr: np.ndarray | None =
 
     Preserves 3-channel color. Never modifies the authoritative original evidence.
     """
+    original_path = Path(original_path)
     analysis_path = original_path.parent / f"{original_path.stem}_analysis.jpg"
+
     if analysis_path.exists():
         try:
             with Image.open(analysis_path) as im:
@@ -987,6 +989,20 @@ def get_ocr_input_artifact(scan_image) -> tuple[Path | None, str, dict]:
         try:
             with Image.open(default_analysis) as im:
                 return default_analysis, "analysis", {"source_width": im.width, "source_height": im.height}
+        except Exception:
+            pass
+
+    # If neither exists but authoritative original evidence exists on disk,
+    # generate the derived analysis image on-demand so safe OCR processing can complete
+    # without ever exposing or modifying the original evidence file.
+    if orig_path.exists():
+        try:
+            der_path, w_out, h_out = prepare_derived_analysis_image(orig_path)
+            try:
+                scan_image.analysis_file_path = str(der_path)
+            except Exception:
+                pass
+            return der_path, "analysis", {"source_width": w_out, "source_height": h_out}
         except Exception:
             pass
 

@@ -440,6 +440,8 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             if (onSaveFindings) {
               onSaveFindings(formatted);
             }
+          } else {
+            setFindings(buildInitialFindings(fresh));
           }
         }
       } catch (e) {
@@ -479,8 +481,15 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             'Assessment Complete',
             `Server assessment finished.\nVerdict: ${overallDisplay}\n\n✓ ${pCount} Compliant • ⚠️ ${fCount} Violation • ⚪ ${nCount} Not Assessed`
           );
+        } else {
+          const resetFindings = buildInitialFindings(assessed);
+          setFindings(resetFindings);
+          if (onSaveFindings) {
+            onSaveFindings(resetFindings);
+          }
         }
       }
+
     } catch (err) {
       Alert.alert('Reassessment Error', err?.message || 'Server assessment could not be completed.');
     } finally {
