@@ -6,10 +6,10 @@ a join, so on SQLite it is enforced here in the service layer rather than
 declaratively.
 """
 from datetime import date
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
-from models import Finding, Inspection, Scan, Store, User
+from models import Finding, Inspection, Scan, ScanImage, Store, User
 
 LIVE = Scan.duplicate_of.is_(None)
 
@@ -130,6 +130,100 @@ def admin_stats(db: Session, start: date, end: date, area: str | None = None):
     return d
 
 
+def get_low_confidence_scan_subquery():
+    """Scan IDs with unresolved findings having confidence < 0.60 (excluding NULL confidence)."""
+    return (
+        select(Finding.scan_id)
+        .filter(
+            Finding.confidence.is_not(None),
+            Finding.confidence < 0.60,
+            Finding.human_verdict.is_(None),
+        )
+    )
+
+
+def get_technical_recovery_scan_subquery():
+    """Scan IDs with not_assessed findings caused by OCR or provider errors."""
+    return (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "not_assessed",
+            or_(
+                Finding.reason.ilike("%ocr%"),
+                Finding.reason.ilike("%provider%"),
+                Finding.reason.ilike("%technical%"),
+                Finding.reason.ilike("%timeout%"),
+                Finding.reason.ilike("%service unavailable%"),
+                Finding.reason.ilike("%failed to initialize%"),
+            ),
+        )
+    )
+
+
+def get_recapture_guidance_scan_subquery():
+    """Scan IDs with not_assessed findings citing missing evidence, blur, or recapture guidance."""
+    return (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "not_assessed",
+            or_(
+                Finding.reason.ilike("%recapture%"),
+                Finding.reason.ilike("%missing%"),
+                Finding.reason.ilike("%coverage%"),
+                Finding.reason.ilike("%unclear%"),
+                Finding.reason.ilike("%blur%"),
+            ),
+        )
+    )
+
+
+def get_unconfirmed_violation_scan_subquery():
+    """Scan IDs with automated fail findings that have not been human-confirmed."""
+    return (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "fail",
+            Finding.human_verdict.is_(None),
+        )
+    )
+
+
+def get_canonical_subtype_filter(subtype: str):
+    """Return SQLAlchemy expression for filtering scans by canonical review subtype."""
+    if not subtype:
+        return None
+    st = subtype.strip().lower()
+    if st == "technical_recovery":
+        return and_(
+            Scan.overall_result == "not_assessed",
+            Scan.id.in_(get_technical_recovery_scan_subquery()),
+        )
+    elif st in ("recapture_required", "incomplete_coverage"):
+        return and_(
+            Scan.overall_result == "not_assessed",
+            ~Scan.id.in_(get_technical_recovery_scan_subquery()),
+            or_(
+                ~Scan.id.in_(select(ScanImage.scan_id)),
+                Scan.id.in_(get_recapture_guidance_scan_subquery()),
+            ),
+        )
+    elif st in ("unconfirmed_violation", "unconfirmed_violations"):
+        return and_(
+            Scan.overall_result == "violation",
+            Scan.id.in_(get_unconfirmed_violation_scan_subquery()),
+        )
+    elif st in ("confirmed_violation", "confirmed_violations"):
+        return and_(
+            Scan.overall_result == "violation",
+            ~Scan.id.in_(get_unconfirmed_violation_scan_subquery()),
+        )
+    elif st == "low_confidence":
+        return Scan.id.in_(get_low_confidence_scan_subquery())
+    elif st in ("offline_edit", "offline_edits"):
+        return Inspection.edited_offline.is_(True)
+    return None
+
+
 def get_canonical_queue_metrics(
     db: Session,
     user: User | None = None,
@@ -199,14 +293,7 @@ def get_canonical_queue_metrics(
     )
 
     # Low-confidence subquery: finding has confidence < 0.60 (and NOT null), unresolved
-    low_conf_scan_ids = (
-        select(Finding.scan_id)
-        .filter(
-            Finding.confidence.is_not(None),
-            Finding.confidence < 0.60,
-            Finding.human_verdict.is_(None),
-        )
-    )
+    low_conf_scan_ids = get_low_confidence_scan_subquery()
 
     # Review triggers:
     review_trigger_cond = or_(
@@ -257,73 +344,27 @@ def get_canonical_queue_metrics(
 
     # Subcategory breakdowns:
     # Technical OCR/provider recovery
-    technical_error_scan_ids = (
-        select(Finding.scan_id)
-        .filter(
-            Finding.engine_verdict == "not_assessed",
-            or_(
-                Finding.reason.ilike("%ocr%"),
-                Finding.reason.ilike("%provider%"),
-                Finding.reason.ilike("%technical%"),
-                Finding.reason.ilike("%timeout%"),
-                Finding.reason.ilike("%service unavailable%"),
-                Finding.reason.ilike("%failed to initialize%"),
-            ),
-        )
-    )
     technical_recovery_count = (
-        not_assessed_scans.filter(Scan.id.in_(technical_error_scan_ids))
+        not_assessed_scans.filter(get_canonical_subtype_filter("technical_recovery"))
         .with_entities(func.count(func.distinct(Scan.id)))
         .scalar() or 0
     )
 
     # Recapture required: not_assessed scans with 0 images or missing evidence/blur/coverage guidance
-    scans_with_images = select(ScanImage.scan_id)
-    recapture_guidance_scan_ids = (
-        select(Finding.scan_id)
-        .filter(
-            Finding.engine_verdict == "not_assessed",
-            or_(
-                Finding.reason.ilike("%recapture%"),
-                Finding.reason.ilike("%missing%"),
-                Finding.reason.ilike("%coverage%"),
-                Finding.reason.ilike("%unclear%"),
-                Finding.reason.ilike("%blur%"),
-            ),
-        )
-    )
     recapture_required_count = (
-        not_assessed_scans.filter(
-            or_(
-                ~Scan.id.in_(scans_with_images),
-                Scan.id.in_(recapture_guidance_scan_ids),
-            )
-        )
+        not_assessed_scans.filter(get_canonical_subtype_filter("recapture_required"))
         .with_entities(func.count(func.distinct(Scan.id)))
         .scalar() or 0
     )
 
     # Violations breakdown: unconfirmed awaiting adjudication vs confirmed awaiting enforcement
-    scans_with_unconfirmed = (
-        select(Finding.scan_id)
-        .filter(
-            Finding.engine_verdict == "fail",
-            Finding.human_verdict.is_(None),
-        )
-    )
     unconfirmed_violations_count = (
-        filtered_scans.filter(
-            Scan.overall_result == "violation",
-            Scan.id.in_(scans_with_unconfirmed),
-        )
+        filtered_scans.filter(get_canonical_subtype_filter("unconfirmed_violation"))
         .with_entities(func.count(func.distinct(Scan.id)))
         .scalar() or 0
     )
     confirmed_violations_count = (
-        filtered_scans.filter(
-            Scan.overall_result == "violation",
-            ~Scan.id.in_(scans_with_unconfirmed),
-        )
+        filtered_scans.filter(get_canonical_subtype_filter("confirmed_violation"))
         .with_entities(func.count(func.distinct(Scan.id)))
         .scalar() or 0
     )

@@ -54,6 +54,13 @@ class ReviewQueueFilters(BaseModel):
         "not_assessed", "low_confidence", "offline_edit",
         "conflict", "violation", "ALL"
     ] | None = None
+    subtype_filter: Literal[
+        "technical_recovery", "recapture_required", "incomplete_coverage",
+        "unconfirmed_violation", "unconfirmed_violations",
+        "confirmed_violation", "confirmed_violations",
+        "low_confidence", "offline_edit", "offline_edits", "ALL"
+    ] | None = None
+    subtype: str | None = None
     area: str | None = None
     date_from: date | None = None
     date_to: date | None = None
@@ -115,9 +122,9 @@ def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> lis
         else:
             reasons.append({
                 "type": "not_assessed",
-                "subtype": "incomplete_coverage",
+                "subtype": "recapture_required",
                 "severity": "major",
-                "detail": f"{len(na_checks)} of {scan.checks_total} checks not assessed",
+                "detail": f"Incomplete coverage: {len(na_checks)} of {scan.checks_total} checks not assessed; recapture required",
                 "affected_checks": [f.check_id for f in na_checks],
             })
 
@@ -130,6 +137,7 @@ def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> lis
     if low_conf:
         reasons.append({
             "type": "low_confidence",
+            "subtype": "low_confidence",
             "severity": "minor",
             "detail": f"{len(low_conf)} findings with low confidence (< 60%)",
             "affected_checks": [f.check_id for f in low_conf],
@@ -139,6 +147,7 @@ def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> lis
     if getattr(insp, "edited_offline", False):
         reasons.append({
             "type": "offline_edit",
+            "subtype": "offline_edit",
             "severity": "minor",
             "detail": f"Inspection edited offline; clock skew {insp.clock_skew_seconds or 0}s",
         })
@@ -262,6 +271,14 @@ def _build_review_item(insp: Inspection, scan: Scan,
 def get_review_queue(
     status_filter: str | None = Query(default=None),
     reason: str | None = Query(default=None),
+    subtype: str | None = Query(
+        default=None,
+        description="Fine-grained category subtype filter: technical_recovery, recapture_required, incomplete_coverage, unconfirmed_violation, confirmed_violation, low_confidence, offline_edit, all"
+    ),
+    subtype_filter: str | None = Query(
+        default=None,
+        description="Alias for subtype parameter"
+    ),
     area: str | None = Query(default=None),
     priority: str | None = Query(default=None),
     date_from: date | None = Query(default=None),
@@ -280,8 +297,59 @@ def get_review_queue(
     - An inspection was edited offline
     - A scan has genuine low-confidence findings (< 0.60 on unresolved checks)
     """
-    from queries import LIVE
+    from queries import LIVE, get_canonical_subtype_filter, get_low_confidence_scan_subquery
     from sqlalchemy import select
+
+    VALID_REASONS = {
+        "not_assessed", "violation", "low_confidence",
+        "offline_edit", "conflict", "all"
+    }
+    VALID_SUBTYPES = {
+        "technical_recovery", "recapture_required", "incomplete_coverage",
+        "unconfirmed_violation", "unconfirmed_violations",
+        "confirmed_violation", "confirmed_violations",
+        "low_confidence", "offline_edit", "offline_edits", "all"
+    }
+    REASON_SUBTYPE_COMPATIBILITY = {
+        "not_assessed": {"technical_recovery", "recapture_required", "incomplete_coverage", "all"},
+        "violation": {"unconfirmed_violation", "unconfirmed_violations", "confirmed_violation", "confirmed_violations", "all"},
+        "low_confidence": {"low_confidence", "all"},
+        "offline_edit": {"offline_edit", "offline_edits", "all"},
+        "conflict": {"all"},
+        "all": VALID_SUBTYPES,
+    }
+
+    norm_reason = reason.strip().lower() if reason else None
+    if norm_reason and norm_reason not in VALID_REASONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid reason '{reason}'. Allowed values: not_assessed, violation, low_confidence, offline_edit, conflict, all",
+        )
+
+    raw_subtype = subtype if subtype is not None else subtype_filter
+    norm_subtype = raw_subtype.strip().lower() if raw_subtype else None
+    if norm_subtype and norm_subtype not in VALID_SUBTYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Invalid subtype '{raw_subtype}'. Allowed values: "
+                "technical_recovery, recapture_required, incomplete_coverage, "
+                "unconfirmed_violation, confirmed_violation, low_confidence, "
+                "offline_edit, all"
+            ),
+        )
+
+    if norm_reason and norm_reason != "all" and norm_subtype and norm_subtype != "all":
+        allowed_for_reason = REASON_SUBTYPE_COMPATIBILITY.get(norm_reason, set())
+        if norm_subtype not in allowed_for_reason:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Incompatible filter combination: reason='{reason}' cannot be combined with "
+                    f"subtype='{raw_subtype}'. Compatible subtypes for reason='{norm_reason}': "
+                    f"{', '.join(sorted(allowed_for_reason))}."
+                ),
+            )
 
     # Base query for reviewable scans under submitted inspections
     q = (
@@ -315,25 +383,24 @@ def get_review_queue(
         )
 
     # Low-confidence subquery
-    low_conf_scan_subq = (
-        select(Finding.scan_id)
-        .filter(
-            Finding.confidence.is_not(None),
-            Finding.confidence < 0.60,
-            Finding.human_verdict.is_(None),
-        )
-    )
+    low_conf_scan_subq = get_low_confidence_scan_subquery()
 
-    # Reason-based filtering
-    if reason and reason.lower() != "all":
-        if reason == "not_assessed":
+    # Apply subtype or reason filtering at database query level
+    if norm_subtype and norm_subtype != "all":
+        subtype_cond = get_canonical_subtype_filter(norm_subtype)
+        if subtype_cond is not None:
+            q = q.filter(subtype_cond)
+    elif norm_reason and norm_reason != "all":
+        if norm_reason == "not_assessed":
             q = q.filter(Scan.overall_result == "not_assessed")
-        elif reason == "violation":
+        elif norm_reason == "violation":
             q = q.filter(Scan.overall_result == "violation")
-        elif reason == "offline_edit":
+        elif norm_reason == "offline_edit":
             q = q.filter(Inspection.edited_offline.is_(True))
-        elif reason == "low_confidence":
+        elif norm_reason == "low_confidence":
             q = q.filter(Scan.id.in_(low_conf_scan_subq))
+        elif norm_reason == "conflict":
+            q = q.filter(Scan.id.in_([]))
     else:
         # Default: all review-worthy items
         q = q.filter(
