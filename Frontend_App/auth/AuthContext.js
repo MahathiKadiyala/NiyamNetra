@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { getItem, setItem, deleteItem } from './secureStore';
-import { api, setAccessToken, applySavedBackend, onSessionExpired } from '../api/client';
-import { clearReviewQueueCache, bumpReviewCacheSessionId } from '../offline/queue';
+import { api, setAccessToken, setCurrentUser, applySavedBackend, onSessionExpired } from '../api/client';
+import { clearReviewQueueCache, bumpReviewCacheSessionId, handleAuthorizationScopeChange, setEffectiveScopeStr } from '../offline/queue';
 
 const ACCESS_KEY = 'nn_access';
 
@@ -51,11 +51,14 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     // A second 401 (or a failed refresh) means the session is dead — the API
     // layer broadcasts it; drop role so the app routes back to Login.
-    const off = onSessionExpired(() => {
+    const off = onSessionExpired(async () => {
       try { bumpReviewCacheSessionId(); } catch {}
-      try { clearReviewQueueCache(); } catch {}
+      try { await handleAuthorizationScopeChange(null); } catch {}
+      try { await clearReviewQueueCache(); } catch {}
+      setCurrentUser(null);
       setRole(null);
       deleteItem(ACCESS_KEY);
+      deleteItem('nn_user_profile');
     });
     (async () => {
       // try/finally guarantees isLoading is cleared even if storage or the
@@ -73,19 +76,33 @@ export function AuthProvider({ children }) {
           // refresh cookie in the /auth/refresh call below.
           if (Platform.OS !== 'web') {
             const saved = await getItem(ACCESS_KEY);
+            const savedProfileRaw = await getItem('nn_user_profile');
+            let savedUser = null;
+            if (savedProfileRaw) {
+              try { savedUser = JSON.parse(savedProfileRaw); } catch {}
+            }
             if (saved) {
               setAccessToken(saved);
+              if (savedUser) {
+                setCurrentUser(savedUser);
+                setEffectiveScopeStr(savedUser);
+              }
               const r = decodeRole(saved);
               if (r) {
                 setRole(r);
                 setIsLoading(false);
                 // Best-effort refresh in the background to extend the session.
                 api.post('/auth/refresh', undefined, { timeout: 10000 })
-                  .then(({ data }) => {
+                  .then(async ({ data }) => {
                     if (data?.access_token) {
                       setAccessToken(data.access_token);
                       setItem(ACCESS_KEY, data.access_token);
                       setRole(decodeRole(data.access_token));
+                      if (data?.user) {
+                        setCurrentUser(data.user);
+                        setItem('nn_user_profile', JSON.stringify(data.user));
+                        await handleAuthorizationScopeChange(data.user);
+                      }
                     }
                   })
                   .catch(() => {});
@@ -107,6 +124,10 @@ export function AuthProvider({ children }) {
               setAccessToken(data.access_token);
               setItem(ACCESS_KEY, data.access_token);
               setRole(decodeRole(data.access_token));
+              if (data?.user) {
+                setCurrentUser(data.user);
+                await handleAuthorizationScopeChange(data.user);
+              }
             }
           } catch {
             /* no valid web cookie session */
@@ -129,9 +150,14 @@ export function AuthProvider({ children }) {
     // otherwise still time out and show "cannot reach the backend" for a backend
     // that is healthy.
     const { data } = await api.post('/auth/login', { employee_id, password, install_id }, { timeout: 60000 });
-    try { bumpReviewCacheSessionId(); } catch {}
-    try { clearReviewQueueCache(null, { legacyOnly: true }); } catch {}
     setAccessToken(data.access_token);
+    if (data?.user) {
+      setCurrentUser(data.user);
+      await handleAuthorizationScopeChange(data.user);
+    } else {
+      try { bumpReviewCacheSessionId(); } catch {}
+    }
+    try { clearReviewQueueCache(null, { legacyOnly: true }); } catch {}
     await setItem('nn_install_id', data.install_id);
     // Native session restore: the refresh cookie never reaches SecureStore
     // (httpOnly, web-only), so persist the access token for silent rehydrate
@@ -141,6 +167,9 @@ export function AuthProvider({ children }) {
     // on web the httpOnly refresh cookie restores the session instead.
     if (Platform.OS !== 'web') {
       await setItem(ACCESS_KEY, data.access_token);
+      if (data?.user) {
+        await setItem('nn_user_profile', JSON.stringify(data.user));
+      }
     }
     // The refresh token is only ever set as an httpOnly cookie by the server —
     // it is never written to SecureStore, which is the point of the cookie.
@@ -149,6 +178,7 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     try { await api.post('/auth/logout'); } catch {}
+    try { await handleAuthorizationScopeChange(null); } catch {}
     try { await clearReviewQueueCache(); } catch {}
     try { bumpReviewCacheSessionId(); } catch {}
     // nn_install_id is DEVICE identity, not session state — keep it so the
@@ -156,7 +186,9 @@ export function AuthProvider({ children }) {
     // in-memory token + role are cleared here (refresh cookie is cleared
     // server-side by /auth/logout).
     setAccessToken(null);
+    setCurrentUser(null);
     await deleteItem(ACCESS_KEY);
+    await deleteItem('nn_user_profile');
     setRole(null);
   };
 

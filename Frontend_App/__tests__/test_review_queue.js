@@ -934,6 +934,7 @@ async function runTests() {
     createReviewQueueEnvelope,
     validateCachedReviewQueue,
     normalizeUserScope,
+    normalizeJurisdiction,
     normalizeReviewQueryParams,
     safeHash,
     REVIEW_CACHE_VERSION,
@@ -943,6 +944,11 @@ async function runTests() {
     getReviewCacheSessionId,
     bumpReviewCacheSessionId,
     resetReviewCacheSession,
+    evaluateAuthorizationScopeChange,
+    handleAuthorizationScopeChange,
+    getEffectiveScopeStr,
+    setEffectiveScopeStr,
+    resetEffectiveScopeForTesting,
   } = cacheKeyModule;
 
   // Test 36: Two pages of the same category produce different cache identities
@@ -1743,6 +1749,287 @@ async function runTests() {
     assert.strictEqual(res, null);
     assert.strictEqual(uiState, 'unavailable');
     assert.ok(errorMessage.includes('No offline cache'));
+  });
+
+  // --- Module 6.8: Effective Authorization Scope Fingerprint & Cache Invalidation Tests ---
+
+  // Test 79: Same user and role with different authorized jurisdictions produce distinct effective scopes
+  it('79. Same user and role with different authorized jurisdictions produce distinct effective scopes', () => {
+    const scopeSouth = normalizeUserScope({ userId: '10', role: 'inspector', jurisdiction: 'South Delhi' });
+    const scopeNorth = normalizeUserScope({ userId: '10', role: 'inspector', jurisdiction: 'North Delhi' });
+
+    assert.ok(scopeSouth);
+    assert.ok(scopeNorth);
+    assert.strictEqual(scopeSouth.scopeStr, 'u10_inspector_south_delhi');
+    assert.strictEqual(scopeNorth.scopeStr, 'u10_inspector_north_delhi');
+    assert.notStrictEqual(scopeSouth.scopeStr, scopeNorth.scopeStr);
+
+    const keySouth = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violations' }, scopeSouth);
+    const keyNorth = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violations' }, scopeNorth);
+
+    assert.notStrictEqual(keySouth.storageKey, keyNorth.storageKey);
+    assert.notStrictEqual(keySouth.filename, keyNorth.filename);
+  });
+
+  // Test 80: Cache envelope generated under South Delhi scope is rejected during validation under North Delhi scope
+  it('80. Cache envelope generated under South Delhi scope is rejected during validation under North Delhi scope', () => {
+    const scopeSouth = { userId: '10', role: 'inspector', jurisdiction: 'South Delhi' };
+    const scopeNorth = { userId: '10', role: 'inspector', jurisdiction: 'North Delhi' };
+    const query = { subtype: 'recapture_required', offset: 0 };
+
+    const keySouth = buildReviewQueueCacheKey(query, scopeSouth);
+    const envelopeSouth = createReviewQueueEnvelope([{ scan_id: 201 }], keySouth.query, scopeSouth);
+
+    // Attempt to validate with North Delhi scope
+    const validation = validateCachedReviewQueue(envelopeSouth, query, scopeNorth);
+    assert.strictEqual(validation.valid, false);
+    assert.ok(validation.reason.includes('Scope mismatch'));
+  });
+
+  // Test 81: Same user and role with unchanged effective permissions retains valid cache access
+  it('81. Same user and role with unchanged effective permissions retains valid cache access', () => {
+    const scope1 = { userId: '10', role: 'inspector', jurisdiction: 'South Delhi' };
+    const scope2 = { userId: '10', role: 'inspector', jurisdiction: 'South Delhi' };
+    const query = { subtype: 'technical_recovery', offset: 0 };
+
+    const key = buildReviewQueueCacheKey(query, scope1);
+    const envelope = createReviewQueueEnvelope([{ scan_id: 301 }], key.query, scope1);
+
+    const validation = validateCachedReviewQueue(envelope, query, scope2);
+    assert.strictEqual(validation.valid, true);
+    assert.strictEqual(validation.isStale, false);
+  });
+
+  // Test 82: Different roles produce isolated cache access even if user ID and jurisdiction are identical
+  it('82. Different roles produce isolated cache access even if user ID and jurisdiction are identical', () => {
+    const inspectorScope = normalizeUserScope({ userId: '10', role: 'inspector', jurisdiction: 'South Delhi' });
+    const adminScope = normalizeUserScope({ userId: '10', role: 'admin', jurisdiction: 'South Delhi' });
+
+    assert.strictEqual(inspectorScope.scopeStr, 'u10_inspector_south_delhi');
+    assert.strictEqual(adminScope.scopeStr, 'u10_admin_south_delhi');
+    assert.notStrictEqual(inspectorScope.scopeStr, adminScope.scopeStr);
+
+    const keyInspector = buildReviewQueueCacheKey({}, inspectorScope);
+    const keyAdmin = buildReviewQueueCacheKey({}, adminScope);
+
+    assert.notStrictEqual(keyInspector.storageKey, keyAdmin.storageKey);
+  });
+
+  // Test 83: Tenant or organizational restrictions are included where they actually exist
+  it('83. Tenant or organizational restrictions are embedded in effective scope when provided', () => {
+    const scopedTenant = normalizeUserScope({
+      userId: '15',
+      role: 'inspector',
+      jurisdiction: 'Delhi West',
+      tenantId: 'dept_lm_01',
+    });
+
+    assert.strictEqual(scopedTenant.scopeStr, 'u15_inspector_delhi_west_t_dept_lm_01');
+    assert.strictEqual(scopedTenant.tenant, 'dept_lm_01');
+
+    const keyTenant = buildReviewQueueCacheKey({}, scopedTenant);
+    assert.ok(keyTenant.storageKey.includes('_u15_inspector_delhi_west_t_dept_lm_01_'));
+  });
+
+  // Test 84: Missing authoritative permission-scope data fails safely
+  it('84. Missing authoritative permission-scope data fails safely without creating or reading cache', () => {
+    assert.strictEqual(normalizeUserScope(null), null);
+    assert.strictEqual(normalizeUserScope(undefined), null);
+    assert.strictEqual(normalizeUserScope({}), null);
+    assert.strictEqual(normalizeUserScope({ role: 'inspector' }), null); // Missing userId
+    assert.strictEqual(normalizeUserScope({ jurisdiction: 'South Delhi' }), null); // Missing userId
+
+    assert.strictEqual(buildReviewQueueCacheKey({}, null), null);
+    assert.strictEqual(buildReviewSummaryCacheKey({}, null), null);
+
+    const validEnvelope = createReviewQueueEnvelope([{ scan_id: 1 }], {}, 'u1_inspector');
+    assert.strictEqual(validateCachedReviewQueue(validEnvelope, {}, null).valid, false);
+  });
+
+  // Test 85: Arbitrary search filters are not mistaken for authoritative permission grants
+  it('85. Arbitrary search filters are not mistaken for authoritative permission grants', () => {
+    const userScope = { userId: '25', role: 'inspector', jurisdiction: 'South Delhi' };
+    const queryWithSearch = { area: 'North Delhi Market' };
+
+    const key = buildReviewQueueCacheKey(queryWithSearch, userScope);
+    // User scope remains strictly South Delhi; North Delhi Market only affects query parameter and queryHash
+    assert.strictEqual(key.scope, 'u25_inspector_south_delhi');
+    assert.strictEqual(key.query.area, 'north delhi market');
+    assert.ok(!key.scope.includes('north_delhi_market'));
+
+    // Client passing query filter as userScope must fail safely
+    const invalidScopeAttempt = normalizeUserScope({ area: 'South Delhi' });
+    assert.strictEqual(invalidScopeAttempt, null);
+  });
+
+  // Test 86: Silent refresh with unchanged effective scope preserves valid offline cache data
+  await itAsync('86. Silent refresh with unchanged effective scope preserves valid offline cache data', async () => {
+    resetEffectiveScopeForTesting();
+    const initialUser = { id: 30, role: 'inspector', jurisdiction: 'East Zone' };
+    const initRes = await handleAuthorizationScopeChange(initialUser);
+    assert.strictEqual(initRes.changed, false);
+    assert.strictEqual(initRes.action, 'initialized');
+    assert.strictEqual(getEffectiveScopeStr(), 'u30_inspector_east_zone');
+
+    const sessionGenBefore = getReviewCacheSessionId();
+
+    // Mock cache in place
+    let invalidatedScope = null;
+    const mockInvalidator = async (scope) => { invalidatedScope = scope; };
+
+    // Silent refresh returns identical identity, role, and jurisdiction
+    const refreshedUser = { id: 30, role: 'inspector', jurisdiction: 'East Zone' };
+    const refreshRes = await handleAuthorizationScopeChange(refreshedUser, mockInvalidator);
+
+    assert.strictEqual(refreshRes.changed, false);
+    assert.strictEqual(refreshRes.action, 'preserved');
+    assert.strictEqual(invalidatedScope, null, 'Cache must NOT be invalidated when scope is unchanged');
+    assert.strictEqual(getReviewCacheSessionId(), sessionGenBefore, 'Session generation must NOT bump on routine refresh');
+  });
+
+  // Test 87: Refresh that changes the effective scope invalidates incompatible cache access
+  await itAsync('87. Refresh that changes effective jurisdiction scope invalidates incompatible cache access', async () => {
+    resetEffectiveScopeForTesting();
+    setEffectiveScopeStr({ id: 35, role: 'inspector', jurisdiction: 'East Zone' });
+
+    let purgedScope = null;
+    const mockInvalidator = async (scope) => { purgedScope = scope; };
+
+    const sessionGenBefore = getReviewCacheSessionId();
+
+    // Server informs client that officer was transferred to West Zone
+    const updatedUser = { id: 35, role: 'inspector', jurisdiction: 'West Zone' };
+    const result = await handleAuthorizationScopeChange(updatedUser, mockInvalidator);
+
+    assert.strictEqual(result.changed, true);
+    assert.strictEqual(result.action, 'scope_changed');
+    assert.strictEqual(result.oldScope, 'u35_inspector_east_zone');
+    assert.strictEqual(result.newScope, 'u35_inspector_west_zone');
+    assert.strictEqual(purgedScope, 'u35_inspector_east_zone', 'Old East Zone cache must be purged');
+    assert.strictEqual(getReviewCacheSessionId(), sessionGenBefore + 1, 'Session generation must bump to kill in-flight requests');
+    assert.strictEqual(getEffectiveScopeStr(), 'u35_inspector_west_zone');
+  });
+
+  // Test 88: Role promotion/demotion invalidates old scope cache and bumps session generation
+  await itAsync('88. Role promotion/demotion cannot reuse incompatible cache and invalidates old scope', async () => {
+    resetEffectiveScopeForTesting();
+    setEffectiveScopeStr({ id: 40, role: 'inspector', jurisdiction: 'Central' });
+
+    let purgedScope = null;
+    const mockInvalidator = async (scope) => { purgedScope = scope; };
+
+    // Officer promoted to Admin
+    const promotedUser = { id: 40, role: 'admin' };
+    const result = await handleAuthorizationScopeChange(promotedUser, mockInvalidator);
+
+    assert.strictEqual(result.changed, true);
+    assert.strictEqual(result.action, 'scope_changed');
+    assert.strictEqual(purgedScope, 'u40_inspector_central');
+    assert.strictEqual(result.newScope, 'u40_admin');
+  });
+
+  // Test 89: Area/tenant permission changes cannot reuse old restricted data
+  it('89. Area/tenant permission changes cannot reuse old restricted data during cache read', () => {
+    const oldScope = { userId: '45', role: 'inspector', jurisdiction: 'Zone Alpha' };
+    const newScope = { userId: '45', role: 'inspector', jurisdiction: 'Zone Beta' };
+    const query = { subtype: 'unconfirmed_violations', offset: 0 };
+
+    const keyOld = buildReviewQueueCacheKey(query, oldScope);
+    const envelopeOld = createReviewQueueEnvelope([{ scan_id: 4501 }], keyOld.query, oldScope);
+
+    // Reading with new jurisdiction scope MUST fail validation
+    const validation = validateCachedReviewQueue(envelopeOld, query, newScope);
+    assert.strictEqual(validation.valid, false);
+    assert.ok(validation.reason.includes('Scope mismatch'));
+  });
+
+  // Test 90: Late in-flight write from previous jurisdiction is rejected when new jurisdiction is active
+  it('90. Late in-flight write from previous jurisdiction is rejected when new jurisdiction is active', () => {
+    const sessionGen1 = 20;
+    const oldJurisdictionScope = normalizeUserScope({ userId: '50', role: 'inspector', jurisdiction: 'District A' });
+    const sessionBinding = { scope: oldJurisdictionScope, sessionId: sessionGen1 };
+
+    // Active session updated to District B
+    const sessionGen2 = 21;
+    const newJurisdictionScope = normalizeUserScope({ userId: '50', role: 'inspector', jurisdiction: 'District B' });
+
+    const writeAllowed = simulateCacheWriteRevalidation(sessionBinding, newJurisdictionScope, sessionGen2);
+    assert.strictEqual(writeAllowed, false, 'Late write from District A must not write to District B cache');
+  });
+
+  // Test 91: Missing scope information cannot fall back to an unscoped queue cache
+  it('91. Missing scope information cannot fall back to an unscoped queue cache', () => {
+    const query = { subtype: 'recapture_required', offset: 0 };
+    const nullScopeKey = buildReviewQueueCacheKey(query, null);
+    assert.strictEqual(nullScopeKey, null);
+
+    const undefinedScopeKey = buildReviewQueueCacheKey(query, undefined);
+    assert.strictEqual(undefinedScopeKey, null);
+  });
+
+  // Test 92: Cached summaries and pages use compatible scope semantics
+  it('92. Cached summaries and pages use compatible scope semantics', () => {
+    const scopeSouth = { userId: '60', role: 'inspector', jurisdiction: 'South Delhi' };
+    const scopeNorth = { userId: '60', role: 'inspector', jurisdiction: 'North Delhi' };
+
+    const queueKeySouth = buildReviewQueueCacheKey({}, scopeSouth);
+    const summaryKeySouth = buildReviewSummaryCacheKey({}, scopeSouth);
+    const queueKeyNorth = buildReviewQueueCacheKey({}, scopeNorth);
+    const summaryKeyNorth = buildReviewSummaryCacheKey({}, scopeNorth);
+
+    assert.ok(queueKeySouth.storageKey.includes(scopeSouth.jurisdiction.toLowerCase().replace(' ', '_')));
+    assert.ok(summaryKeySouth.storageKey.includes(scopeSouth.jurisdiction.toLowerCase().replace(' ', '_')));
+    assert.notStrictEqual(summaryKeySouth.storageKey, summaryKeyNorth.storageKey);
+  });
+
+  // Test 93: Reconnection after offline operation refreshes authorization through the real session workflow
+  await itAsync('93. Reconnection after offline operation triggers authorization scope verification', async () => {
+    resetEffectiveScopeForTesting();
+    // 1. Offline operation used cached data from known scope
+    const offlineScope = { id: 70, role: 'inspector', jurisdiction: 'South Zone' };
+    setEffectiveScopeStr(offlineScope);
+    assert.strictEqual(getEffectiveScopeStr(), 'u70_inspector_south_zone');
+
+    let purgedScope = null;
+    const mockInvalidator = async (scope) => { purgedScope = scope; };
+
+    // 2. Reconnection: client calls /auth/refresh and server returns updated profile (jurisdiction changed)
+    const serverAuthoritativeUser = { id: 70, role: 'inspector', jurisdiction: 'North Zone' };
+    const res = await handleAuthorizationScopeChange(serverAuthoritativeUser, mockInvalidator);
+
+    assert.strictEqual(res.changed, true);
+    assert.strictEqual(res.oldScope, 'u70_inspector_south_zone');
+    assert.strictEqual(res.newScope, 'u70_inspector_north_zone');
+    assert.strictEqual(purgedScope, 'u70_inspector_south_zone');
+  });
+
+  // Test 94: If offline, application operates truthfully without claiming server-side revocation detection
+  it('94. Offline miss produces truthful unavailable state without exposing unpermitted cached data', () => {
+    const evaluateOfflineState = (cachedEnvelope, currentScope) => {
+      if (!cachedEnvelope) return { status: 'unavailable', message: 'No offline cache available for this query.' };
+      const validation = validateCachedReviewQueue(cachedEnvelope, {}, currentScope);
+      if (!validation.valid) return { status: 'unavailable', message: 'Cached data belongs to a different authorization scope.' };
+      return { status: 'cached', data: cachedEnvelope.items };
+    };
+
+    const envelopeOld = createReviewQueueEnvelope([{ scan_id: 99 }], {}, 'u80_inspector_district_1');
+    const activeScope = { userId: '80', role: 'inspector', jurisdiction: 'District 2' };
+
+    const outcome = evaluateOfflineState(envelopeOld, activeScope);
+    assert.strictEqual(outcome.status, 'unavailable');
+    assert.ok(outcome.message.includes('different authorization scope'));
+  });
+
+  // Test 95: Cache keys and filenames never expose bearer tokens or passwords
+  it('95. Cache keys and filenames never expose bearer tokens or passwords even with secret-like input', () => {
+    const rawJwtWithSecret = 'header.eyJzdWIiOiI5OSIsInJvbGUiOiJpbnNwZWN0b3IiLCJqdXJpc2RpY3Rpb24iOiJzb3V0aCJ9.my_super_secret_signature';
+    const scope = normalizeUserScope(rawJwtWithSecret);
+
+    const key = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violations' }, scope);
+    assert.ok(!key.storageKey.includes('my_super_secret_signature'));
+    assert.ok(!key.storageKey.includes('header.'));
+    assert.ok(!key.filename.includes('my_super_secret_signature'));
+    assert.ok(!key.storageKey.includes('Bearer'));
   });
 
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);

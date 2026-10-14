@@ -16,7 +16,7 @@ import Card from '../../components/Card';
 import EmptyState from '../../components/EmptyState';
 import PrimaryButton from '../../components/PrimaryButton';
 import { fetchReviewQueue, fetchReviewSummary } from '../../api/review';
-import { getAccessToken } from '../../api/client';
+import { getAccessToken, getCurrentUser } from '../../api/client';
 import {
   cacheReviewQueue,
   loadCachedReviewQueue,
@@ -68,7 +68,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
     const filterKey = facetFilter !== 'ALL' ? facetFilter : 'ALL';
 
     // Capture active authenticated scope and session generation at request start
-    const requestScope = normalizeUserScope(getAccessToken());
+    const requestScope = normalizeUserScope(getCurrentUser() || getAccessToken());
     const requestSessionId = getReviewCacheSessionId();
 
     try {

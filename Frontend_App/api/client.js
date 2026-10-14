@@ -5,6 +5,10 @@ let accessToken = null;
 export const setAccessToken = (t) => { accessToken = t; };
 export const getAccessToken = () => accessToken;
 
+let currentUser = null;
+export const setCurrentUser = (u) => { currentUser = u; };
+export const getCurrentUser = () => currentUser;
+
 // Session-death broadcast. The response interceptor cannot import AuthContext
 // (circular import), so it emits here and AuthContext subscribes on mount to
 // drop role → app returns to Login. Screens can also subscribe.
@@ -13,8 +17,21 @@ export const onSessionExpired = (cb) => {
   sessionListeners.add(cb);
   return () => { sessionListeners.delete(cb); };
 };
+
+// Auth-scope change broadcast. AuthContext and queue subscribe to permission/role/jurisdiction changes.
+const authScopeListeners = new Set();
+export const onAuthScopeChanged = (cb) => {
+  authScopeListeners.add(cb);
+  return () => { authScopeListeners.delete(cb); };
+};
+export function emitAuthScopeChanged(user) {
+  authScopeListeners.forEach((cb) => { try { cb(user); } catch { /* listener must not throw */ } });
+}
+
 function emitSessionExpired() {
   setAccessToken(null);
+  setCurrentUser(null);
+  emitAuthScopeChanged(null);
   sessionListeners.forEach((cb) => { try { cb(); } catch { /* listener must not throw */ } });
 }
 
@@ -161,6 +178,10 @@ api.interceptors.response.use(null, async (err) => {
   if (!refreshing) {
     refreshing = api.post('/auth/refresh').then(r => {
       setAccessToken(r.data.access_token);
+      if (r.data?.user) {
+        setCurrentUser(r.data.user);
+        emitAuthScopeChanged(r.data.user);
+      }
       return r.data.access_token;
     }).catch(e => { throw e; }).finally(() => { refreshing = null; });
   }

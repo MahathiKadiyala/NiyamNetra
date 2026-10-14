@@ -24,6 +24,21 @@ export function safeHash(str) {
 }
 
 /**
+ * Canonicalize jurisdiction / district name into a safe, deterministic scope token.
+ * e.g. "South Delhi" -> "south_delhi", "  HYDERABAD-NORTH " -> "hyderabad_north"
+ * Returns null if empty, missing, or non-string.
+ */
+export function normalizeJurisdiction(jurisdiction) {
+  if (!jurisdiction || typeof jurisdiction !== 'string') return null;
+  const cleaned = jurisdiction
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned || null;
+}
+
+/**
  * Decode role and user identity (sub) from unverified JWT access token payload.
  * Hermes + standard base64 fallback.
  * Strictly ignores signature; used solely to extract caller's non-secret user_id & role.
@@ -59,6 +74,7 @@ export function decodeTokenScope(token) {
     return {
       userId: String(payload.sub),
       role: String(payload.role || 'inspector'),
+      jurisdiction: payload.jurisdiction ? String(payload.jurisdiction) : null,
     };
   } catch {
     return null;
@@ -92,17 +108,122 @@ export function resetReviewCacheSession() {
   return currentSessionGeneration;
 }
 
+let lastKnownEffectiveScopeStr = null;
+
+/**
+ * Return last known effective authorization scope string, or null.
+ */
+export function getEffectiveScopeStr() {
+  return lastKnownEffectiveScopeStr;
+}
+
+/**
+ * Update the last known effective authorization scope string.
+ */
+export function setEffectiveScopeStr(scope) {
+  const norm = normalizeUserScope(scope);
+  lastKnownEffectiveScopeStr = norm ? norm.scopeStr : null;
+  return lastKnownEffectiveScopeStr;
+}
+
+/**
+ * Reset tracked effective scope for testing.
+ */
+export function resetEffectiveScopeForTesting() {
+  lastKnownEffectiveScopeStr = null;
+}
+
+/**
+ * Pure evaluation of authorization scope transition.
+ * Compares previous effective authorization scope with the newly established scope.
+ *
+ * Scenarios:
+ * 1. Initial login / app startup: oldScope is null -> action 'initialized', changed: false.
+ * 2. Unchanged scope (silent token refresh, re-auth with same role/jurisdiction):
+ *    oldScope === newScope -> action 'preserved', changed: false.
+ * 3. Changed scope (promotion, jurisdiction transfer, account switch):
+ *    oldScope !== newScope -> action 'scope_changed', changed: true.
+ * 4. Logout / session expiry:
+ *    newScope is null -> action 'logged_out', changed: true.
+ */
+export function evaluateAuthorizationScopeChange(newUserOrScope, currentScopeStr = lastKnownEffectiveScopeStr) {
+  const norm = normalizeUserScope(newUserOrScope);
+  const newScopeStr = norm ? norm.scopeStr : null;
+  const oldScopeStr = currentScopeStr;
+
+  if (oldScopeStr === null) {
+    return {
+      changed: false,
+      oldScope: null,
+      newScope: newScopeStr,
+      action: 'initialized',
+    };
+  }
+
+  if (oldScopeStr === newScopeStr) {
+    return {
+      changed: false,
+      oldScope: oldScopeStr,
+      newScope: newScopeStr,
+      action: 'preserved',
+    };
+  }
+
+  return {
+    changed: true,
+    oldScope: oldScopeStr,
+    newScope: newScopeStr,
+    action: newScopeStr ? 'scope_changed' : 'logged_out',
+  };
+}
+
+/**
+ * Execute authorization scope transition:
+ * Compares old and new scopes. If changed, bumps session generation to kill in-flight requests
+ * and invokes onInvalidateScope callback (if provided) to purge old cache entries.
+ */
+export async function handleAuthorizationScopeChange(newUserOrScope, onInvalidateScope = null) {
+  const evalResult = evaluateAuthorizationScopeChange(newUserOrScope, lastKnownEffectiveScopeStr);
+
+  if (!evalResult.changed) {
+    lastKnownEffectiveScopeStr = evalResult.newScope;
+    return evalResult;
+  }
+
+  // Permission scope changed or session terminated
+  bumpReviewCacheSessionId();
+
+  if (typeof onInvalidateScope === 'function') {
+    try {
+      await onInvalidateScope(evalResult.oldScope);
+    } catch {}
+  }
+
+  lastKnownEffectiveScopeStr = evalResult.newScope;
+  return evalResult;
+}
+
 /**
  * Canonicalize and normalize authenticated principal scope.
- * Accepts { userId, role }, session binding { scope: ... }, scope string 'u1_inspector', or JWT string.
+ * Accepts:
+ *   - User profile object: { id/userId, role, jurisdiction, tenantId }
+ *   - Session binding: { scope: ... }
+ *   - Nested wrapper: { user: ... } or { currentUser: ... }
+ *   - Canonical scope string: 'u1_inspector', 'u1_inspector_south_delhi', 'u1_admin'
+ *   - Raw JWT string: decodes non-secret sub & role
+ *
+ * Enforces authoritative authorization dimensions (user identity, role, and authorized jurisdiction/district).
  * Fails safely (returns null) if identity cannot be established.
+ * Never treats client query parameters (e.g. area search filter) as an authorization grant.
  */
 export function normalizeUserScope(userScope) {
   if (!userScope) return null;
 
-  // Unwrap session binding object if passed
-  if (typeof userScope === 'object' && userScope.scope) {
-    return normalizeUserScope(userScope.scope);
+  // Unwrap session binding or wrapper object if passed
+  if (typeof userScope === 'object') {
+    if (userScope.scope) return normalizeUserScope(userScope.scope);
+    if (userScope.user) return normalizeUserScope(userScope.user);
+    if (userScope.currentUser) return normalizeUserScope(userScope.currentUser);
   }
 
   if (typeof userScope === 'string') {
@@ -110,35 +231,60 @@ export function normalizeUserScope(userScope) {
       // JWT token passed
       const decoded = decodeTokenScope(userScope);
       if (!decoded) return null;
+      const normJuris = normalizeJurisdiction(decoded.jurisdiction);
       return {
         userId: decoded.userId,
         role: decoded.role,
-        scopeStr: `u${decoded.userId}_${decoded.role}`,
+        jurisdiction: normJuris,
+        scopeStr: normJuris ? `u${decoded.userId}_${decoded.role}_${normJuris}` : `u${decoded.userId}_${decoded.role}`,
       };
     }
     const trimmed = userScope.trim();
     if (trimmed.startsWith('u') && trimmed.includes('_')) {
       const parts = trimmed.slice(1).split('_');
+      const userId = parts[0];
+      const role = parts[1] || 'inspector';
+      const jurisdiction = parts.length > 2 ? parts.slice(2).join('_') : null;
       return {
-        userId: parts[0],
-        role: parts.slice(1).join('_') || 'inspector',
+        userId,
+        role,
+        jurisdiction,
         scopeStr: trimmed,
       };
     }
+    const rawId = trimmed.startsWith('u') ? trimmed.slice(1) : trimmed;
+    if (!rawId) return null;
     return {
-      userId: trimmed,
+      userId: rawId,
       role: 'inspector',
-      scopeStr: `u${trimmed}_inspector`,
+      jurisdiction: null,
+      scopeStr: `u${rawId}_inspector`,
     };
   }
 
-  const userId = String(userScope.userId || userScope.sub || userScope.id || '').trim();
+  const userId = String(userScope.userId || userScope.sub || userScope.id || userScope.user_id || '').trim();
   if (!userId) return null;
   const role = String(userScope.role || 'inspector').trim().toLowerCase();
+  const rawJurisdiction = userScope.jurisdiction || userScope.authorizedArea || userScope.area_scope || userScope.authorized_area || null;
+  const jurisdiction = normalizeJurisdiction(rawJurisdiction);
+
+  const rawTenant = userScope.tenantId || userScope.tenant || userScope.tenant_id || userScope.orgId || userScope.organization || null;
+  const tenant = normalizeJurisdiction(rawTenant);
+
+  let scopeStr = `u${userId}_${role}`;
+  if (jurisdiction) {
+    scopeStr += `_${jurisdiction}`;
+  }
+  if (tenant) {
+    scopeStr += `_t_${tenant}`;
+  }
+
   return {
     userId,
     role,
-    scopeStr: `u${userId}_${role}`,
+    jurisdiction,
+    tenant: tenant || null,
+    scopeStr,
   };
 }
 

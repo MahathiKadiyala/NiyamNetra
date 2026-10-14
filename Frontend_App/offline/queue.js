@@ -388,13 +388,14 @@ export async function enqueueConflictResolution({
   return id;
 }
 
-import { getAccessToken } from '../api/client';
+import { getAccessToken, getCurrentUser, onAuthScopeChanged } from '../api/client';
 import {
   buildReviewQueueCacheKey,
   buildReviewSummaryCacheKey,
   createReviewQueueEnvelope,
   validateCachedReviewQueue,
   normalizeUserScope,
+  normalizeJurisdiction,
   normalizeReviewQueryParams,
   MAX_CACHED_PAGES,
   REVIEW_CACHE_VERSION,
@@ -404,6 +405,7 @@ import {
   getReviewCacheSessionId,
   bumpReviewCacheSessionId,
   resetReviewCacheSession,
+  evaluateAuthorizationScopeChange,
 } from './reviewCacheKey';
 
 export {
@@ -412,6 +414,7 @@ export {
   createReviewQueueEnvelope,
   validateCachedReviewQueue,
   normalizeUserScope,
+  normalizeJurisdiction,
   normalizeReviewQueryParams,
   MAX_CACHED_PAGES,
   REVIEW_CACHE_VERSION,
@@ -421,7 +424,91 @@ export {
   getReviewCacheSessionId,
   bumpReviewCacheSessionId,
   resetReviewCacheSession,
+  evaluateAuthorizationScopeChange,
 };
+
+let lastKnownEffectiveScopeStr = null;
+
+export function getEffectiveScopeStr() {
+  return lastKnownEffectiveScopeStr;
+}
+
+export function setEffectiveScopeStr(scope) {
+  const norm = normalizeUserScope(scope);
+  lastKnownEffectiveScopeStr = norm ? norm.scopeStr : null;
+  return lastKnownEffectiveScopeStr;
+}
+
+export function resetEffectiveScopeForTesting() {
+  lastKnownEffectiveScopeStr = null;
+}
+
+/**
+ * Handle authorization scope changes across session lifecycle events (login, refresh, role/area change, logout).
+ * Compares previous effective authorization scope with the newly established scope.
+ *
+ * - If effective scope is demonstrably unchanged (e.g. routine token refresh with same user, role, jurisdiction),
+ *   preserves valid offline cache and returns { changed: false }.
+ * - If effective scope changed (role promotion/demotion, jurisdiction transfer, user switch, logout):
+ *   1. Bumps review cache session generation to invalidate any in-flight requests from the old scope.
+ *   2. Immediately purges incompatible cache entries from the previous scope.
+ *   3. Updates the active effective scope.
+ *   4. Returns { changed: true, oldScope, newScope, action }.
+ */
+export async function handleAuthorizationScopeChange(newUserOrScope) {
+  const norm = normalizeUserScope(newUserOrScope);
+  const newScopeStr = norm ? norm.scopeStr : null;
+  const oldScopeStr = lastKnownEffectiveScopeStr;
+
+  // 1. Initial state (app boot or first login before any previous scope was recorded)
+  if (oldScopeStr === null) {
+    lastKnownEffectiveScopeStr = newScopeStr;
+    return {
+      changed: false,
+      oldScope: null,
+      newScope: newScopeStr,
+      action: 'initialized',
+    };
+  }
+
+  // 2. Both old and new scopes exist: compare them
+  if (oldScopeStr === newScopeStr) {
+    // Routine token refresh or idempotent session update with unchanged permissions
+    return {
+      changed: false,
+      oldScope: oldScopeStr,
+      newScope: newScopeStr,
+      action: 'preserved',
+    };
+  }
+
+  // 3. Authorization scope changed (role change, jurisdiction transfer, account switch, or logout)
+  bumpReviewCacheSessionId();
+
+  // Invalidate incompatible cache for the previous scope
+  if (oldScopeStr) {
+    await clearReviewQueueCache(oldScopeStr);
+  } else {
+    await clearReviewQueueCache();
+  }
+
+  lastKnownEffectiveScopeStr = newScopeStr;
+
+  return {
+    changed: true,
+    oldScope: oldScopeStr,
+    newScope: newScopeStr,
+    action: newScopeStr ? 'scope_changed' : 'logged_out',
+  };
+}
+
+try {
+  onAuthScopeChanged(async (user) => {
+    try {
+      await handleAuthorizationScopeChange(user);
+    } catch {}
+  });
+} catch {}
 
 async function pruneNativeReviewCache(scopeStr) {
   try {
@@ -492,7 +579,7 @@ export async function cacheReviewQueue(payload, queryParams = {}, sessionBinding
     if (!payload) return false;
 
     // Current active authenticated session at time of write
-    const currentScope = normalizeUserScope(getAccessToken());
+    const currentScope = normalizeUserScope(getCurrentUser() || getAccessToken());
     if (!currentScope) {
       // Unauthenticated scope must never cache protected data
       return false;
@@ -543,7 +630,7 @@ export async function cacheReviewQueue(payload, queryParams = {}, sessionBinding
  */
 export async function loadCachedReviewQueue(queryParams = {}, userScope = null) {
   try {
-    const scope = normalizeUserScope(userScope || getAccessToken());
+    const scope = normalizeUserScope(userScope || getCurrentUser() || getAccessToken());
     if (!scope) {
       // Missing or unauthenticated identity fails safely
       return null;
@@ -602,7 +689,7 @@ export async function cacheReviewSummary(summary, params = {}, sessionBinding = 
     if (!summary) return false;
 
     // Current active authenticated session at time of write
-    const currentScope = normalizeUserScope(getAccessToken());
+    const currentScope = normalizeUserScope(getCurrentUser() || getAccessToken());
     if (!currentScope) return false;
 
     const currentSessionId = getReviewCacheSessionId();
@@ -652,7 +739,7 @@ export async function cacheReviewSummary(summary, params = {}, sessionBinding = 
  */
 export async function loadCachedReviewSummary(params = {}, userScope = null) {
   try {
-    const scope = normalizeUserScope(userScope || getAccessToken());
+    const scope = normalizeUserScope(userScope || getCurrentUser() || getAccessToken());
     if (!scope) return null;
 
     const keyInfo = buildReviewSummaryCacheKey(params, scope);
@@ -706,8 +793,10 @@ export async function clearReviewQueueCache(userScope = null, options = {}) {
     // Invalidate in-flight writes immediately
     bumpReviewCacheSessionId();
 
-    const scope = normalizeUserScope(userScope || getAccessToken());
-    const scopeStr = scope ? scope.scopeStr : null;
+    const scope = userScope !== null && userScope !== undefined
+      ? normalizeUserScope(userScope)
+      : null;
+    const scopeStr = scope ? scope.scopeStr : (typeof userScope === 'string' && userScope.trim() ? userScope.trim() : null);
     const { legacyOnly = false } = options;
 
     if (isWeb) {
