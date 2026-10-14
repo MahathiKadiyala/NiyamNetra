@@ -38,20 +38,13 @@ export async function fetchReviewQueue(params = {}) {
 
 /**
  * Fetch fast summary metrics for the review queue.
+ * @param {Object} [params]
+ * @param {string} [params.area]
+ * @param {string} [params.status_filter]
  */
-export async function fetchReviewSummary() {
-  try {
-    const { data } = await api.get('/review/queue/summary');
-    return data;
-  } catch (e) {
-    return {
-      total: 0,
-      not_assessed: 0,
-      violations_pending: 0,
-      offline_edits: 0,
-      low_confidence: 0,
-    };
-  }
+export async function fetchReviewSummary(params = {}) {
+  const { data } = await api.get('/review/queue/summary', { params });
+  return data;
 }
 
 /**

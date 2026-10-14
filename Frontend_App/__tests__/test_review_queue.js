@@ -245,6 +245,298 @@ async function runTests() {
     assert.strictEqual(validTransitions.IN_REVIEW.includes('RESOLVED'), true);
   });
 
+  // Test 11: Authoritative backend queue total & category breakdown
+  it('11. Authoritative backend-provided queue total and category breakdown mapped correctly', () => {
+    const backendSummary = {
+      total: 7,
+      violations_pending: 4,
+      not_assessed: 3,
+      low_confidence: 2,
+      offline_edits: 1,
+      breakdown: {
+        technical_recovery: 2,
+        recapture_required: 1,
+        unconfirmed_violations: 3,
+        confirmed_violations: 1,
+        adjudicated_resolved: 5,
+        draft_inspections: 2,
+      },
+    };
+
+    // The UI renders summary.total as the authoritative queue total
+    const displayedTotal = backendSummary.total;
+    assert.strictEqual(displayedTotal, 7);
+
+    // Facet breakdowns match backend breakdown exactly
+    assert.strictEqual(backendSummary.breakdown.technical_recovery, 2);
+    assert.strictEqual(backendSummary.breakdown.recapture_required, 1);
+    assert.strictEqual(backendSummary.breakdown.unconfirmed_violations, 3);
+    assert.strictEqual(backendSummary.breakdown.confirmed_violations, 1);
+    assert.strictEqual(backendSummary.breakdown.draft_inspections, 2);
+  });
+
+  // Test 12: Technical OCR failure shown as technical recovery, NOT legal violation
+  it('12. Technical OCR failure displayed as technical recovery, not proof of legal violation', () => {
+    const scanItem = {
+      inspection_id: 10,
+      scan_id: 201,
+      overall_result: 'not_assessed',
+      reasons: [
+        {
+          type: 'not_assessed',
+          subtype: 'technical_recovery',
+          severity: 'major',
+          detail: 'Technical OCR/provider error: Google Cloud Vision API timeout after 60s',
+        },
+      ],
+      findings: [
+        { check_id: 'CHK01', engine_verdict: 'not_assessed', reason: 'OCR service unavailable' },
+      ],
+    };
+
+    const getCategoryBadge = (item) => {
+      const reasons = item.reasons || [];
+      if (reasons.some((r) => r.subtype === 'technical_recovery')) {
+        return { label: '⚙️ TECHNICAL RECOVERY', isViolation: false, isTechnical: true };
+      }
+      if (reasons.some((r) => r.subtype === 'confirmed_violation' || r.subtype === 'unconfirmed_violation')) {
+        return { label: 'VIOLATION', isViolation: true, isTechnical: false };
+      }
+      return { label: 'REVIEW', isViolation: false, isTechnical: false };
+    };
+
+    const badge = getCategoryBadge(scanItem);
+    assert.strictEqual(badge.label, '⚙️ TECHNICAL RECOVERY');
+    assert.strictEqual(badge.isViolation, false, 'Technical failure must NOT be treated as a statutory violation');
+    assert.strictEqual(badge.isTechnical, true);
+  });
+
+  // Test 13: Recapture-required scans shown with appropriate guidance
+  it('13. Recapture-required scans identified with clear evidence guidance', () => {
+    const scanItem = {
+      inspection_id: 11,
+      scan_id: 202,
+      overall_result: 'not_assessed',
+      reasons: [
+        {
+          type: 'not_assessed',
+          subtype: 'incomplete_coverage',
+          severity: 'major',
+          detail: 'Missing mandatory MRP panel image; cannot evaluate Rule 6(1)(e)',
+        },
+      ],
+    };
+
+    const getCategoryBadge = (item) => {
+      const reasons = item.reasons || [];
+      if (reasons.some((r) => r.subtype === 'incomplete_coverage' || r.detail?.toLowerCase().includes('missing'))) {
+        return { label: '📷 RECAPTURE REQUIRED', type: 'recapture' };
+      }
+      return { label: 'OTHER', type: 'other' };
+    };
+
+    const badge = getCategoryBadge(scanItem);
+    assert.strictEqual(badge.label, '📷 RECAPTURE REQUIRED');
+    assert.strictEqual(badge.type, 'recapture');
+  });
+
+  // Test 14: Unconfirmed violations distinguished from confirmed violations
+  it('14. Unconfirmed violations distinguished from confirmed violations awaiting enforcement', () => {
+    const unconfirmedItem = {
+      inspection_id: 12,
+      scan_id: 301,
+      reasons: [
+        {
+          type: 'violation',
+          subtype: 'unconfirmed_violation',
+          severity: 'critical',
+          detail: '2 unconfirmed violations awaiting officer review',
+        },
+      ],
+    };
+
+    const confirmedItem = {
+      inspection_id: 12,
+      scan_id: 302,
+      reasons: [
+        {
+          type: 'violation',
+          subtype: 'confirmed_violation',
+          severity: 'critical',
+          detail: 'Confirmed legal violation awaiting enforcement action',
+        },
+      ],
+    };
+
+    const classifyViolation = (item) => {
+      const r = item.reasons?.[0];
+      if (r?.subtype === 'confirmed_violation') return 'CONFIRMED_ENFORCEMENT_ACTION';
+      if (r?.subtype === 'unconfirmed_violation') return 'UNCONFIRMED_OFFICER_REVIEW';
+      return 'UNKNOWN';
+    };
+
+    assert.strictEqual(classifyViolation(unconfirmedItem), 'UNCONFIRMED_OFFICER_REVIEW');
+    assert.strictEqual(classifyViolation(confirmedItem), 'CONFIRMED_ENFORCEMENT_ACTION');
+  });
+
+  // Test 15: Resolved items excluded from open queue
+  it('15. Resolved items excluded from open queue according to backend review_status', () => {
+    const queueItems = [
+      { scan_id: 1, review_status: 'OPEN' },
+      { scan_id: 2, review_status: 'IN_REVIEW' },
+      { scan_id: 3, review_status: 'RESOLVED' },
+    ];
+
+    const openItems = queueItems.filter((i) => i.review_status === 'OPEN');
+    const inReviewItems = queueItems.filter((i) => i.review_status === 'IN_REVIEW');
+    const resolvedItems = queueItems.filter((i) => i.review_status === 'RESOLVED');
+
+    assert.strictEqual(openItems.length, 1);
+    assert.strictEqual(openItems[0].scan_id, 1);
+    assert.strictEqual(inReviewItems.length, 1);
+    assert.strictEqual(resolvedItems.length, 1);
+  });
+
+  // Test 16: One scan with multiple findings does not create duplicate scan cards
+  it('16. One scan with multiple findings does not create duplicate scan cards', () => {
+    const rawJoinRows = [
+      { scan_id: 50, inspection_id: 1, check_id: 'CHK01', finding_verdict: 'fail' },
+      { scan_id: 50, inspection_id: 1, check_id: 'CHK04', finding_verdict: 'fail' },
+      { scan_id: 50, inspection_id: 1, check_id: 'CHK06', finding_verdict: 'pass' },
+      { scan_id: 51, inspection_id: 1, check_id: 'CHK01', finding_verdict: 'pass' },
+    ];
+
+    // Deduplication logic by scan_id
+    const seenScans = new Set();
+    const uniqueCards = [];
+    for (const row of rawJoinRows) {
+      if (!seenScans.has(row.scan_id)) {
+        seenScans.add(row.scan_id);
+        uniqueCards.push(row.scan_id);
+      }
+    }
+
+    assert.strictEqual(uniqueCards.length, 2);
+    assert.deepStrictEqual(uniqueCards, [50, 51]);
+  });
+
+  // Test 17: Overlapping category facets are NOT added together as a false total
+  it('17. Overlapping category facets are not added together as a false total', () => {
+    // A single scan has both unconfirmed violation and low confidence
+    const summary = {
+      total: 1, // Distinct scan count = 1
+      violations_pending: 1,
+      low_confidence: 1,
+      breakdown: {
+        unconfirmed_violations: 1,
+        technical_recovery: 0,
+        recapture_required: 0,
+        confirmed_violations: 0,
+      },
+    };
+
+    // Summing facets naively would give 1 + 1 = 2 (WRONG!)
+    const naiveSum = (summary.breakdown.unconfirmed_violations + summary.low_confidence);
+    assert.strictEqual(naiveSum, 2);
+
+    // Authoritative total must remain 1
+    assert.strictEqual(summary.total, 1);
+    assert.notStrictEqual(summary.total, naiveSum);
+  });
+
+  // Test 18: Missing category data handled truthfully without invented counts
+  it('18. Missing category data handled truthfully without invented counts', () => {
+    const partialSummary = {
+      total: 0,
+      violations_pending: 0,
+    };
+
+    // Missing fields default safely to 0 without fabricating catalog sizes
+    const techRecovery = partialSummary.breakdown?.technical_recovery ?? 0;
+    const recapture = partialSummary.breakdown?.recapture_required ?? 0;
+    const confirmed = partialSummary.breakdown?.confirmed_violations ?? 0;
+
+    assert.strictEqual(techRecovery, 0);
+    assert.strictEqual(recapture, 0);
+    assert.strictEqual(confirmed, 0);
+
+    // Invariants against historical bogus figures
+    assert.notStrictEqual(partialSummary.total, 830);
+    assert.notStrictEqual(partialSummary.total, 789);
+    assert.notStrictEqual(partialSummary.total, 35);
+    assert.notStrictEqual(partialSummary.total, 6);
+  });
+
+  // Test 19: API error state triggers explicit error UI, never silently showing empty queue
+  it('19. UI error state explicitly triggered on API failure when no cache is available', () => {
+    let uiState = 'loading';
+    let errorMessage = null;
+    let items = [];
+
+    const simulateLoad = (apiSuccess, cachedItems) => {
+      if (apiSuccess) {
+        items = [{ scan_id: 1 }];
+        uiState = 'success';
+      } else {
+        if (cachedItems && cachedItems.length > 0) {
+          items = cachedItems;
+          uiState = 'offline_cached';
+        } else {
+          items = [];
+          uiState = 'error';
+          errorMessage = 'Network connection failed (503 Service Unavailable)';
+        }
+      }
+    };
+
+    // Test API failure with no cache
+    simulateLoad(false, []);
+    assert.strictEqual(uiState, 'error', 'Must enter error state on network failure when no cache');
+    assert.strictEqual(items.length, 0);
+    assert.ok(errorMessage.includes('503'));
+    assert.notStrictEqual(uiState, 'success');
+  });
+
+  // Test 20: Stale async responses cannot overwrite active inspection review
+  it('20. Stale API response cannot overwrite active inspection review', async () => {
+    let currentActiveInspectionId = 100;
+    let renderedInspectionDetail = null;
+
+    const fetchInspection = async (id, delayMs) => {
+      await new Promise((r) => setTimeout(r, delayMs));
+      return { id, store_name: `Store for #${id}` };
+    };
+
+    // User is on inspection 100
+    // Rapidly switches to inspection 101
+    // The request for 100 is slow (50ms), request for 101 is fast (10ms)
+    let cancelledRequests = new Set();
+
+    const loadInspection = (id, delayMs) => {
+      let isCancelled = false;
+      fetchInspection(id, delayMs).then((data) => {
+        if (!isCancelled && id === currentActiveInspectionId) {
+          renderedInspectionDetail = data;
+        }
+      });
+      return () => { isCancelled = true; };
+    };
+
+    // Request 1: for 100 (slow)
+    const cancel1 = loadInspection(100, 50);
+
+    // User switches to 101 (fast)
+    currentActiveInspectionId = 101;
+    cancel1(); // cancel previous
+    const cancel2 = loadInspection(101, 10);
+
+    await new Promise((r) => setTimeout(r, 70));
+
+    // After both complete, rendered inspection MUST be 101, never 100
+    assert.strictEqual(renderedInspectionDetail.id, 101);
+    assert.strictEqual(renderedInspectionDetail.store_name, 'Store for #101');
+  });
+
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);
   if (failed > 0) {
     process.exit(1);

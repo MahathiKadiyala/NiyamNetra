@@ -30,6 +30,8 @@ export default function InspectorFlow({ navigation }) {
 
   // --- Handlers ---
   const handleStartInspection = () => {
+    setActiveSession(null);
+    setSelectedScan(null);
     setMode('new_inspection');
   };
 
@@ -41,6 +43,7 @@ export default function InspectorFlow({ navigation }) {
   const handleResumeDraft = async (inspectionId) => {
     if (!inspectionId) return;
     try {
+      setSelectedScan(null);
       const details = await fetchInspectionDetails(inspectionId);
       if (details?.status === 'draft') {
         const reconstructedScans = (details.scans || []).map((s) => ({
@@ -69,13 +72,13 @@ export default function InspectorFlow({ navigation }) {
           id: details.id,
           serverInspectionId: details.id,
           store: {
-            id: details.store_id,
-            name: details.store_name,
-            address: details.store_address,
-            city: details.store_city,
-            district: details.store_district,
-            state: details.store_state,
-            pincode: details.store_pincode,
+            id: details.store_id || details.store?.id,
+            name: details.store_name || details.store?.name || 'Retail Establishment',
+            address: details.store_address || details.store?.address || '',
+            city: details.store_city || details.store?.city || '',
+            district: details.store_district || details.store?.district || '',
+            state: details.store_state || details.store?.state || '',
+            pincode: details.store_pincode || details.store?.pincode || '',
           },
           transaction_type: details.transaction_type || 'retail_sale',
           coords: {
@@ -88,13 +91,18 @@ export default function InspectorFlow({ navigation }) {
           notes: details.notes || '',
           scans: reconstructedScans,
         });
+        setSelectedScan(null);
         setMode('session');
       } else {
+        Alert.alert(
+          'Inspection Finalized',
+          'This inspection has already been submitted and cannot be reopened as an active draft. Opening final inspection dossier.'
+        );
         handleOpenInspectionReport(inspectionId);
       }
     } catch (err) {
       console.warn('[InspectorFlow] Failed to resume draft:', err?.message || err);
-      Alert.alert('Resume Failed', 'Unable to load draft inspection details. Please check your connection.');
+      Alert.alert('Resume Failed', 'Unable to load draft inspection details. Please check your network connection.');
     }
   };
 
@@ -135,6 +143,7 @@ export default function InspectorFlow({ navigation }) {
   };
 
   const handleInspectionSessionStarted = (sessionData) => {
+    setSelectedScan(null);
     setActiveSession({
       ...sessionData,
       scans: [],

@@ -419,6 +419,37 @@ export async function loadCachedReviewQueue() {
   }
 }
 
+const REVIEW_SUMMARY_CACHE_KEY = 'nn_review_summary_cache';
+
+export async function cacheReviewSummary(summary) {
+  try {
+    if (isWeb) {
+      globalThis.localStorage?.setItem(REVIEW_SUMMARY_CACHE_KEY, JSON.stringify(summary || null));
+      return;
+    }
+    await ensureDir();
+    const cachePath = pendingDir() + 'review_summary_cache.json';
+    await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(summary || null));
+  } catch {}
+}
+
+export async function loadCachedReviewSummary() {
+  try {
+    if (isWeb) {
+      const raw = globalThis.localStorage?.getItem(REVIEW_SUMMARY_CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    }
+    await ensureDir();
+    const cachePath = pendingDir() + 'review_summary_cache.json';
+    const info = await FileSystem.getInfoAsync(cachePath);
+    if (!info.exists) return null;
+    const raw = await FileSystem.readAsStringAsync(cachePath);
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export async function enqueueRecaptureTaskFulfillment({
   taskId,
   inspectionId,

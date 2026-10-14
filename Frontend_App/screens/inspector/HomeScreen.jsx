@@ -179,7 +179,7 @@ export default function HomeScreen({ navigation, onStartInspection, onResumeInsp
                     {storeName}
                   </Text>
                   <Text style={styles.captionText}>
-                    {scanCount} packages sampled • {txType}
+                    {scanCount === 0 ? '0 packages sampled (new draft)' : `${scanCount} package(s) sampled`} • {txType}
                   </Text>
                 </View>
                 <Pressable
@@ -285,14 +285,47 @@ export default function HomeScreen({ navigation, onStartInspection, onResumeInsp
                   {(reviewSummary?.total ?? 0) > 0 && (
                     <View style={{ backgroundColor: '#FEE2E2', borderColor: '#FCA5A5', borderWidth: 1, marginLeft: 6, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
                       <Text style={{ fontSize: 10, fontWeight: '800', color: '#B91C1C' }}>
-                        {reviewSummary.total} PENDING
+                        {reviewSummary.total} ACTIONABLE
                       </Text>
                     </View>
                   )}
                 </View>
                 <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 4 }}>
-                  Adjudicate incomplete evidence, low confidence, and unconfirmed violations.
+                  Adjudicate incomplete evidence, technical recovery, and unconfirmed violations.
                 </Text>
+                {/* Authoritative Category Facets */}
+                {reviewSummary?.breakdown && (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                    {(reviewSummary.breakdown.unconfirmed_violations ?? 0) > 0 && (
+                      <View style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D', borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3 }}>
+                        <Text style={{ fontSize: 9, fontWeight: '700', color: '#D97706' }}>
+                          ⚠️ {reviewSummary.breakdown.unconfirmed_violations} unconfirmed
+                        </Text>
+                      </View>
+                    )}
+                    {(reviewSummary.breakdown.confirmed_violations ?? 0) > 0 && (
+                      <View style={{ backgroundColor: '#FEE2E2', borderColor: '#FCA5A5', borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3 }}>
+                        <Text style={{ fontSize: 9, fontWeight: '700', color: '#B91C1C' }}>
+                          🚨 {reviewSummary.breakdown.confirmed_violations} confirmed
+                        </Text>
+                      </View>
+                    )}
+                    {(reviewSummary.breakdown.technical_recovery ?? 0) > 0 && (
+                      <View style={{ backgroundColor: '#EDE9FE', borderColor: '#DDD6FE', borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3 }}>
+                        <Text style={{ fontSize: 9, fontWeight: '700', color: '#6D28D9' }}>
+                          ⚙️ {reviewSummary.breakdown.technical_recovery} tech recovery
+                        </Text>
+                      </View>
+                    )}
+                    {(reviewSummary.breakdown.recapture_required ?? 0) > 0 && (
+                      <View style={{ backgroundColor: '#FEF3C7', borderColor: '#FDE68A', borderWidth: 1, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3 }}>
+                        <Text style={{ fontSize: 9, fontWeight: '700', color: '#B45309' }}>
+                          📷 {reviewSummary.breakdown.recapture_required} recapture
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                )}
               </View>
               <Text style={{ fontSize: 13, fontWeight: '700', color: colors.netraTeal }}>
                 Open →

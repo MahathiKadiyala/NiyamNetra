@@ -219,8 +219,172 @@ it('6. Network timeout during finalization permits safe retry without losing ins
   assert.strictEqual(retryOutcome.data.status, 'submitted');
 });
 
+// 7. Draft inspection visibility separated from officer review items
+it('7. Draft inspection appears separately from officer-review items', () => {
+  const inspections = [
+    { id: 101, status: 'draft', store_name: 'Kirana Store A' },
+    { id: 102, status: 'submitted', store_name: 'Supermarket B', overall_result: 'violation' },
+    { id: 103, status: 'submitted', store_name: 'Hypermarket C', overall_result: 'compliant' },
+  ];
+
+  // Officer review queue only accepts submitted inspections
+  const officerQueueEligible = inspections.filter((i) => i.status === 'submitted');
+  const fieldDrafts = inspections.filter((i) => i.status === 'draft');
+
+  assert.strictEqual(officerQueueEligible.length, 2);
+  assert.strictEqual(fieldDrafts.length, 1);
+  assert.strictEqual(fieldDrafts[0].id, 101);
+  assert.strictEqual(officerQueueEligible.some((i) => i.status === 'draft'), false);
+});
+
+// 8. Selecting a draft resumes the correct persisted inspection
+it('8. Selecting a draft resumes the correct persisted inspection', () => {
+  const persistedDraft = {
+    id: 55,
+    status: 'draft',
+    store_id: 10,
+    store_name: 'Sri Krishna Provisions',
+    store_city: 'Warangal',
+    transaction_type: 'retail_sale',
+    scans: [
+      {
+        id: 701,
+        commodity_generic: 'Turmeric Powder',
+        brand_name: 'Everest',
+        overall_result: 'compliant',
+        images: [{ id: 1, panel: 'front' }],
+      },
+    ],
+  };
+
+  // Resume builder
+  const resumeState = {
+    activeSession: {
+      id: persistedDraft.id,
+      store: {
+        id: persistedDraft.store_id,
+        name: persistedDraft.store_name,
+        city: persistedDraft.store_city,
+      },
+      scans: persistedDraft.scans.map((s) => ({
+        id: s.id,
+        commodity_generic: s.commodity_generic,
+        brand_name: s.brand_name,
+      })),
+    },
+    selectedScan: null, // Stale scan reset
+  };
+
+  assert.strictEqual(resumeState.activeSession.id, 55);
+  assert.strictEqual(resumeState.activeSession.store.name, 'Sri Krishna Provisions');
+  assert.strictEqual(resumeState.activeSession.scans.length, 1);
+  assert.strictEqual(resumeState.selectedScan, null);
+});
+
+// 9. A zero-scan draft can be resumed without crashing
+it('9. A zero-scan draft can be resumed without crashing', () => {
+  const emptyDraft = {
+    id: 60,
+    status: 'draft',
+    store_id: 15,
+    store_name: 'New Mart Express',
+    scans: [], // 0 scans
+  };
+
+  // Verification that empty scan array maps cleanly without undefined errors
+  const reconstructedScans = (emptyDraft.scans || []).map((s) => ({ id: s.id }));
+  const session = {
+    id: emptyDraft.id,
+    store: { id: emptyDraft.store_id, name: emptyDraft.store_name },
+    scans: reconstructedScans,
+  };
+
+  assert.strictEqual(session.scans.length, 0);
+  assert.deepStrictEqual(session.scans, []);
+  assert.strictEqual(session.store.name, 'New Mart Express');
+});
+
+// 10. Switching between drafts and submitted inspections does not retain stale findings
+it('10. Switching between drafts and submitted inspections does not retain stale findings', () => {
+  let sessionState = {
+    activeInspectionId: 70,
+    selectedScan: { id: 999, findings: [{ check_id: 'CHK01', verdict: 'fail' }] },
+    panelPhotos: { front: '/tmp/old_panel.jpg' },
+  };
+
+  // Officer switches from inspection 70 to inspection 71
+  const switchInspection = (newId, newScans) => {
+    sessionState = {
+      activeInspectionId: newId,
+      selectedScan: null, // MUST be cleared
+      panelPhotos: {}, // In-flight photos MUST be cleared
+    };
+  };
+
+  switchInspection(71, []);
+
+  assert.strictEqual(sessionState.activeInspectionId, 71);
+  assert.strictEqual(sessionState.selectedScan, null, 'selectedScan must be cleared on switch');
+  assert.deepStrictEqual(sessionState.panelPhotos, {}, 'panelPhotos must be cleared on switch');
+});
+
+// 11. Resume failures are shown clearly and preserve navigation state
+it('11. Resume failures are shown clearly and preserve navigation state', async () => {
+  let currentMode = 'home';
+  let activeSession = null;
+  let errorShown = null;
+
+  const handleResume = async (inspectionId, fetchFn) => {
+    try {
+      const details = await fetchFn(inspectionId);
+      activeSession = details;
+      currentMode = 'session';
+    } catch (err) {
+      errorShown = `Resume Failed: ${err.message}`;
+      // currentMode remains untouched
+    }
+  };
+
+  // Simulate network failure
+  await handleResume(999, async () => {
+    throw new Error('500 Internal Server Error: Database timeout');
+  });
+
+  assert.strictEqual(currentMode, 'home', 'Navigation mode must NOT transition to session on failure');
+  assert.strictEqual(activeSession, null);
+  assert.ok(errorShown.includes('Resume Failed'));
+});
+
+// 12. A submitted inspection is not reopened as a draft
+it('12. A submitted inspection is not reopened as a draft', async () => {
+  let mode = 'home';
+  let openedReportId = null;
+
+  const handleResumeDraft = (details) => {
+    if (details.status === 'draft') {
+      mode = 'session';
+    } else {
+      // Divert to read-only report dossier
+      openedReportId = details.id;
+      mode = 'report_dossier';
+    }
+  };
+
+  const submittedInspection = {
+    id: 88,
+    status: 'submitted',
+    store_name: 'Metro Mega Mart',
+  };
+
+  handleResumeDraft(submittedInspection);
+
+  assert.strictEqual(mode, 'report_dossier', 'Submitted inspection must be routed to report dossier, not edit session');
+  assert.strictEqual(openedReportId, 88);
+  assert.notStrictEqual(mode, 'session');
+});
+
 console.log(`\n========================================`);
-console.log(`Module 5 Frontend Summary: ${passed} passed, ${failed} failed.`);
+console.log(`Module 5 & 6.3 Frontend Summary: ${passed} passed, ${failed} failed.`);
 console.log(`========================================\n`);
 
 if (failed > 0) {

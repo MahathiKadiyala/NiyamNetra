@@ -50,22 +50,53 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
 
   const loadDetail = useCallback(async () => {
     setLoading(true);
+    let isCancelled = false;
     try {
       const data = await fetchInspectionReviewDetail(inspectionId);
-      setDetail(data);
+      if (!isCancelled) {
+        setDetail(data);
+      }
     } catch (err) {
-      setNotification({
-        type: 'error',
-        text: 'Failed to load inspection review detail from backend. Check connectivity.',
-      });
+      if (!isCancelled) {
+        setNotification({
+          type: 'error',
+          text: 'Failed to load inspection review detail from backend. Check connectivity.',
+        });
+      }
     } finally {
-      setLoading(false);
+      if (!isCancelled) {
+        setLoading(false);
+      }
     }
+    return () => {
+      isCancelled = true;
+    };
   }, [inspectionId]);
 
   useEffect(() => {
-    loadDetail();
-  }, [loadDetail]);
+    let cancelled = false;
+    setLoading(true);
+    fetchInspectionReviewDetail(inspectionId)
+      .then((data) => {
+        if (!cancelled) {
+          setDetail(data);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNotification({
+            type: 'error',
+            text: 'Failed to load inspection review detail from backend. Check connectivity.',
+          });
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inspectionId]);
 
   // Handle Finding Accept
   const handleAcceptFinding = async (finding) => {
