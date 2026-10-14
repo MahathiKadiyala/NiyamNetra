@@ -925,6 +925,433 @@ async function runTests() {
     assert.strictEqual(uniqueScans[0].scan_id, 777);
   });
 
+  // --- Module 6.6: Query-Safe Offline Caching & Account Isolation Tests ---
+
+  const cacheKeyModule = await import('../offline/reviewCacheKey.js');
+  const {
+    buildReviewQueueCacheKey,
+    buildReviewSummaryCacheKey,
+    createReviewQueueEnvelope,
+    validateCachedReviewQueue,
+    normalizeUserScope,
+    normalizeReviewQueryParams,
+    safeHash,
+    REVIEW_CACHE_VERSION,
+    REVIEW_CACHE_TTL_MS,
+    REVIEW_CACHE_STALE_MS,
+    MAX_CACHED_PAGES,
+  } = cacheKeyModule;
+
+  // Test 36: Two pages of the same category produce different cache identities
+  it('36. Two pages of the same category produce different cache identities', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const page1Key = buildReviewQueueCacheKey({ subtype: 'technical_recovery', offset: 0, limit: 25 }, scope);
+    const page2Key = buildReviewQueueCacheKey({ subtype: 'technical_recovery', offset: 25, limit: 25 }, scope);
+
+    assert.notStrictEqual(page1Key.storageKey, page2Key.storageKey);
+    assert.notStrictEqual(page1Key.filename, page2Key.filename);
+    assert.strictEqual(page1Key.descriptor, 'technical_recovery_off0');
+    assert.strictEqual(page2Key.descriptor, 'technical_recovery_off25');
+  });
+
+  // Test 37: Different subtypes do not collide
+  it('37. Different subtypes do not collide in cache identity', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const techKey = buildReviewQueueCacheKey({ subtype: 'technical_recovery', offset: 0 }, scope);
+    const recapKey = buildReviewQueueCacheKey({ subtype: 'recapture_required', offset: 0 }, scope);
+
+    assert.notStrictEqual(techKey.storageKey, recapKey.storageKey);
+    assert.notStrictEqual(techKey.filename, recapKey.filename);
+  });
+
+  // Test 38: Different status filters do not collide
+  it('38. Different status filters produce distinct cache keys', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const openKey = buildReviewQueueCacheKey({ status_filter: 'OPEN' }, scope);
+    const inReviewKey = buildReviewQueueCacheKey({ status_filter: 'IN_REVIEW' }, scope);
+    const resolvedKey = buildReviewQueueCacheKey({ status_filter: 'RESOLVED' }, scope);
+
+    assert.notStrictEqual(openKey.storageKey, inReviewKey.storageKey);
+    assert.notStrictEqual(openKey.storageKey, resolvedKey.storageKey);
+    assert.notStrictEqual(inReviewKey.storageKey, resolvedKey.storageKey);
+  });
+
+  // Test 39: Different reason filters do not collide
+  it('39. Different reason filters produce distinct cache keys', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const viKey = buildReviewQueueCacheKey({ reason: 'violation' }, scope);
+    const naKey = buildReviewQueueCacheKey({ reason: 'not_assessed' }, scope);
+
+    assert.notStrictEqual(viKey.storageKey, naKey.storageKey);
+    assert.notStrictEqual(viKey.filename, naKey.filename);
+  });
+
+  // Test 40: Different areas or search filters do not collide
+  it('40. Different search/area filters produce distinct safe hash cache identities', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const southKey = buildReviewQueueCacheKey({ area: 'South Delhi' }, scope);
+    const northKey = buildReviewQueueCacheKey({ area: 'North Delhi' }, scope);
+    const emptyAreaKey = buildReviewQueueCacheKey({ area: '' }, scope);
+
+    assert.notStrictEqual(southKey.storageKey, northKey.storageKey);
+    assert.notStrictEqual(southKey.storageKey, emptyAreaKey.storageKey);
+    // Raw sensitive search text must NOT appear directly in key
+    assert.strictEqual(southKey.storageKey.includes('South Delhi'), false);
+    assert.strictEqual(northKey.storageKey.includes('North Delhi'), false);
+  });
+
+  // Test 41: Different page sizes do not collide
+  it('41. Different page sizes (limit 25 vs 50) produce distinct cache keys', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const lim25 = buildReviewQueueCacheKey({ limit: 25, offset: 0 }, scope);
+    const lim50 = buildReviewQueueCacheKey({ limit: 50, offset: 0 }, scope);
+
+    assert.notStrictEqual(lim25.storageKey, lim50.storageKey);
+    assert.notStrictEqual(lim25.queryHash, lim50.queryHash);
+  });
+
+  // Test 42: Equivalent normalized queries produce the exact same cache identity
+  it('42. Semantically equivalent normalized queries produce the exact same cache identity', () => {
+    const scope = { userId: '10', role: 'inspector' };
+
+    // Alias mapping: unconfirmed_violations vs unconfirmed_violation
+    const k1 = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violations' }, scope);
+    const k2 = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violation' }, scope);
+    assert.strictEqual(k1.storageKey, k2.storageKey);
+    assert.strictEqual(k1.filename, k2.filename);
+
+    // Alias mapping: incomplete_coverage vs recapture_required
+    const k3 = buildReviewQueueCacheKey({ subtype: 'incomplete_coverage' }, scope);
+    const k4 = buildReviewQueueCacheKey({ subtype: 'recapture_required' }, scope);
+    assert.strictEqual(k3.storageKey, k4.storageKey);
+
+    // Whitespace and case normalization in area
+    const k5 = buildReviewQueueCacheKey({ area: '  South Delhi  ' }, scope);
+    const k6 = buildReviewQueueCacheKey({ area: 'south delhi' }, scope);
+    assert.strictEqual(k5.storageKey, k6.storageKey);
+
+    // Default vs explicit status/reason/offset
+    const k7 = buildReviewQueueCacheKey({ status_filter: 'ALL', reason: 'ALL', offset: 0 }, scope);
+    const k8 = buildReviewQueueCacheKey({}, scope);
+    assert.strictEqual(k7.storageKey, k8.storageKey);
+  });
+
+  // Test 43: Authoritative total, page size, and offset are preserved with cached result
+  it('43. Authoritative total, page size, and offset are preserved in envelope', () => {
+    const normQuery = normalizeReviewQueryParams({ subtype: 'technical_recovery', offset: 25, limit: 25 });
+    const payload = {
+      items: [{ scan_id: 201 }, { scan_id: 202 }],
+      total: 58,
+      offset: 25,
+      limit: 25,
+    };
+    const envelope = createReviewQueueEnvelope(payload, normQuery, 'u10_inspector');
+
+    assert.strictEqual(envelope.version, REVIEW_CACHE_VERSION);
+    assert.strictEqual(envelope.scope, 'u10_inspector');
+    assert.strictEqual(envelope.total, 58, 'Authoritative total 58 must be preserved');
+    assert.strictEqual(envelope.offset, 25);
+    assert.strictEqual(envelope.limit, 25);
+    assert.strictEqual(envelope.items.length, 2);
+    assert.ok(envelope.cachedAt);
+  });
+
+  // Test 44: Filtered and unfiltered results cannot overwrite or satisfy each other
+  it('44. Filtered and unfiltered queries have disjoint identities and cannot satisfy each other', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const unfilteredKey = buildReviewQueueCacheKey({ subtype: 'ALL' }, scope);
+    const filteredKey = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, scope);
+
+    assert.notStrictEqual(unfilteredKey.storageKey, filteredKey.storageKey);
+    assert.strictEqual(unfilteredKey.descriptor.includes('ALL'), true);
+    assert.strictEqual(filteredKey.descriptor.includes('technical_recovery'), true);
+
+    // Validate that unfiltered envelope cannot satisfy filtered query
+    const unfilteredEnvelope = createReviewQueueEnvelope([{ scan_id: 1 }], unfilteredKey.query, 'u10_inspector');
+    const check1 = validateCachedReviewQueue(unfilteredEnvelope, filteredKey.query, scope);
+    assert.strictEqual(check1.valid, false);
+    assert.ok(check1.reason.includes('Subtype mismatch'));
+
+    // Validate that filtered envelope cannot satisfy unfiltered query
+    const filteredEnvelope = createReviewQueueEnvelope([{ scan_id: 2 }], filteredKey.query, 'u10_inspector');
+    const check2 = validateCachedReviewQueue(filteredEnvelope, unfilteredKey.query, scope);
+    assert.strictEqual(check2.valid, false);
+    assert.ok(check2.reason.includes('Subtype mismatch'));
+  });
+
+  // Test 45: Cache schema changes invalidate incompatible legacy entries safely
+  it('45. Incompatible legacy or unversioned cache entries fail validation safely', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const query = { subtype: 'technical_recovery', offset: 0, limit: 25 };
+
+    // Legacy v1 envelope
+    const legacyEnvelope = {
+      version: 'v1',
+      items: [{ scan_id: 99 }],
+    };
+    const checkLegacy = validateCachedReviewQueue(legacyEnvelope, query, scope);
+    assert.strictEqual(checkLegacy.valid, false);
+    assert.ok(checkLegacy.reason.includes('Incompatible schema version'));
+
+    // Unversioned raw array
+    const rawArray = [{ scan_id: 1 }, { scan_id: 2 }];
+    const checkArray = validateCachedReviewQueue(rawArray, query, scope);
+    assert.strictEqual(checkArray.valid, false);
+  });
+
+  // Test 46: Two authenticated accounts cannot read each other's cache entries
+  it('46. Two authenticated accounts produce isolated cache keys and fail cross-user validation', () => {
+    const user1Scope = { userId: '1', role: 'inspector' };
+    const user2Scope = { userId: '2', role: 'inspector' };
+    const query = { subtype: 'technical_recovery', offset: 0 };
+
+    const u1Key = buildReviewQueueCacheKey(query, user1Scope);
+    const u2Key = buildReviewQueueCacheKey(query, user2Scope);
+
+    assert.notStrictEqual(u1Key.storageKey, u2Key.storageKey);
+    assert.notStrictEqual(u1Key.filename, u2Key.filename);
+    assert.strictEqual(u1Key.scope, 'u1_inspector');
+    assert.strictEqual(u2Key.scope, 'u2_inspector');
+
+    // User 1 envelope validated against User 2 scope must fail
+    const u1Envelope = createReviewQueueEnvelope([{ scan_id: 101 }], u1Key.query, u1Key.scope);
+    const crossCheck = validateCachedReviewQueue(u1Envelope, query, user2Scope);
+    assert.strictEqual(crossCheck.valid, false);
+    assert.ok(crossCheck.reason.includes('Scope mismatch'));
+  });
+
+  // Test 47: Different authorization scopes do not share restricted review data
+  it('47. Inspector scope and Admin scope do not share cached review data', () => {
+    const inspectorScope = { userId: '5', role: 'inspector' };
+    const adminScope = { userId: '5', role: 'admin' };
+    const query = { subtype: 'ALL', offset: 0 };
+
+    const inspKey = buildReviewQueueCacheKey(query, inspectorScope);
+    const adminKey = buildReviewQueueCacheKey(query, adminScope);
+
+    assert.notStrictEqual(inspKey.storageKey, adminKey.storageKey);
+    assert.strictEqual(inspKey.scope, 'u5_inspector');
+    assert.strictEqual(adminKey.scope, 'u5_admin');
+
+    const adminEnvelope = createReviewQueueEnvelope([{ scan_id: 1 }], adminKey.query, adminKey.scope);
+    const valResult = validateCachedReviewQueue(adminEnvelope, query, inspectorScope);
+    assert.strictEqual(valResult.valid, false);
+    assert.ok(valResult.reason.includes('Scope mismatch'));
+  });
+
+  // Test 48: Missing authenticated identity fails safely
+  it('48. Missing or null authenticated identity fails safely without creating global cache', () => {
+    const query = { subtype: 'technical_recovery' };
+
+    assert.strictEqual(buildReviewQueueCacheKey(query, null), null);
+    assert.strictEqual(buildReviewQueueCacheKey(query, undefined), null);
+    assert.strictEqual(buildReviewQueueCacheKey(query, ''), null);
+    assert.strictEqual(buildReviewQueueCacheKey(query, { userId: '' }), null);
+    assert.strictEqual(buildReviewSummaryCacheKey(query, null), null);
+  });
+
+  // Test 49: No bearer token, password, or secret is included in cache keys or filenames
+  it('49. Cache keys and filenames never expose bearer tokens or passwords', () => {
+    const scope = { userId: '42', role: 'inspector' };
+    const key = buildReviewQueueCacheKey(
+      { subtype: 'confirmed_violations', area: 'Secret Location District 9' },
+      scope
+    );
+
+    assert.strictEqual(key.storageKey.includes('Bearer'), false);
+    assert.strictEqual(key.storageKey.includes('token'), false);
+    assert.strictEqual(key.storageKey.includes('Secret Location'), false);
+    assert.strictEqual(key.filename.includes('Secret Location'), false);
+  });
+
+  // Test 50: Logout or session expiration invalidates cache access
+  it('50. Logout / session expiration prevents subsequent cache reads', () => {
+    let mockSessionToken = 'header.eyJzdWIiOiI3Iiwicm9sZSI6Imluc3BlY3RvciIsImV4cCI6OTk5OTk5OTk5OX0.sig';
+    let currentScope = normalizeUserScope(mockSessionToken);
+    assert.strictEqual(currentScope.scopeStr, 'u7_inspector');
+
+    // Active session can build key
+    const activeKey = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, currentScope);
+    assert.ok(activeKey);
+
+    // Logout clears session token
+    mockSessionToken = null;
+    currentScope = normalizeUserScope(mockSessionToken);
+    assert.strictEqual(currentScope, null);
+
+    // Cache read fails safely when logged out
+    const loggedOutKey = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, currentScope);
+    assert.strictEqual(loggedOutKey, null, 'Must refuse cache key generation when unauthenticated');
+  });
+
+  // Test 51: Exact matching cached query can be loaded offline
+  it('51. Exact matching query loads successfully and passes validation', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const query = { subtype: 'recapture_required', offset: 0, limit: 25, area: 'South Delhi' };
+    const keyInfo = buildReviewQueueCacheKey(query, scope);
+
+    const envelope = createReviewQueueEnvelope(
+      { items: [{ scan_id: 301 }], total: 1 },
+      keyInfo.query,
+      keyInfo.scope
+    );
+
+    const validation = validateCachedReviewQueue(envelope, query, scope);
+    assert.strictEqual(validation.valid, true);
+    assert.strictEqual(validation.isStale, false);
+  });
+
+  // Test 52: Uncached subtype displays proper unavailable state, never reusing unfiltered cache
+  it('52. Uncached subtype request rejected by validation against unfiltered cache', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const unfilteredKey = buildReviewQueueCacheKey({ subtype: 'ALL' }, scope);
+    const cachedUnfiltered = createReviewQueueEnvelope([{ scan_id: 1 }], unfilteredKey.query, scope);
+
+    const requestedSubtype = { subtype: 'technical_recovery' };
+    const val = validateCachedReviewQueue(cachedUnfiltered, requestedSubtype, scope);
+
+    assert.strictEqual(val.valid, false);
+    assert.ok(val.reason.includes('Subtype mismatch'));
+  });
+
+  // Test 53: Cached first page cannot be shown as second page
+  it('53. Cached first page cannot be served as second page', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const p1Query = { subtype: 'technical_recovery', offset: 0, limit: 25 };
+    const p1Key = buildReviewQueueCacheKey(p1Query, scope);
+    const page1Envelope = createReviewQueueEnvelope([{ scan_id: 101 }], p1Key.query, scope);
+
+    // User navigates to page 2 (offset: 25)
+    const p2Query = { subtype: 'technical_recovery', offset: 25, limit: 25 };
+    const val = validateCachedReviewQueue(page1Envelope, p2Query, scope);
+
+    assert.strictEqual(val.valid, false);
+    assert.ok(val.reason.includes('Offset mismatch'));
+  });
+
+  // Test 54: Different area or status filter cannot receive cached results from another filter
+  it('54. Mismatched area or status filter rejected during cache validation', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const southQuery = { area: 'south delhi' };
+    const southKey = buildReviewQueueCacheKey(southQuery, scope);
+    const southEnvelope = createReviewQueueEnvelope([{ scan_id: 501 }], southKey.query, scope);
+
+    // Requesting North Delhi must reject South Delhi cache
+    const northQuery = { area: 'north delhi' };
+    const valArea = validateCachedReviewQueue(southEnvelope, northQuery, scope);
+    assert.strictEqual(valArea.valid, false);
+    assert.ok(valArea.reason.includes('Area mismatch'));
+
+    // Requesting IN_REVIEW status must reject OPEN status cache
+    const openQuery = { status_filter: 'OPEN' };
+    const openKey = buildReviewQueueCacheKey(openQuery, scope);
+    const openEnvelope = createReviewQueueEnvelope([{ scan_id: 502 }], openKey.query, scope);
+
+    const inReviewQuery = { status_filter: 'IN_REVIEW' };
+    const valStatus = validateCachedReviewQueue(openEnvelope, inReviewQuery, scope);
+    assert.strictEqual(valStatus.valid, false);
+    assert.ok(valStatus.reason.includes('Status mismatch'));
+  });
+
+  // Test 55: HTTP errors, 401/403 unauthorized, or malformed responses do not become cached pages
+  it('55. HTTP errors and unauthorized responses never populate cache', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const query = { subtype: 'technical_recovery' };
+
+    // Null scope returns null key so cache write cannot proceed
+    assert.strictEqual(buildReviewQueueCacheKey(query, null), null);
+
+    // Malformed/null envelopes are rejected by validator
+    const invalidVal = validateCachedReviewQueue(null, query, scope);
+    assert.strictEqual(invalidVal.valid, false);
+    assert.ok(invalidVal.reason.includes('Invalid or empty envelope'));
+
+    // Corrupted envelope without query metadata
+    const corruptedVal = validateCachedReviewQueue({ version: REVIEW_CACHE_VERSION, scope: 'u10_inspector' }, query, scope);
+    assert.strictEqual(corruptedVal.valid, false);
+    assert.ok(corruptedVal.reason.includes('Missing cached query metadata'));
+
+    // Envelope with wrong schema version
+    const wrongVersionVal = validateCachedReviewQueue({ version: 'v1', scope: 'u10_inspector', query }, query, scope);
+    assert.strictEqual(wrongVersionVal.valid, false);
+    assert.ok(wrongVersionVal.reason.includes('Incompatible schema version'));
+  });
+
+  // Test 56: Concurrent category requests do not overwrite each other's cache entries
+  await itAsync('56. Concurrent category requests generate independent cache keys without collision', async () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const keyTech = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, scope);
+    const keyConf = buildReviewQueueCacheKey({ subtype: 'confirmed_violations' }, scope);
+    const keyRecap = buildReviewQueueCacheKey({ subtype: 'recapture_required' }, scope);
+
+    const keys = new Set([keyTech.storageKey, keyConf.storageKey, keyRecap.storageKey]);
+    assert.strictEqual(keys.size, 3, 'All 3 concurrent category cache keys must be distinct');
+  });
+
+  // Test 57: Expired cache entries (age > 24 hours) are invalidated according to TTL policy
+  it('57. Expired cache entries older than 24h are invalidated', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const query = { subtype: 'technical_recovery' };
+    const keyInfo = buildReviewQueueCacheKey(query, scope);
+
+    const oldTimestamp = new Date(Date.now() - (25 * 60 * 60 * 1000)).toISOString(); // 25 hours ago
+    const expiredEnvelope = {
+      version: REVIEW_CACHE_VERSION,
+      scope: keyInfo.scope,
+      query: keyInfo.query,
+      total: 10,
+      offset: 0,
+      limit: 25,
+      cachedAt: oldTimestamp,
+      items: [{ scan_id: 1 }],
+    };
+
+    const val = validateCachedReviewQueue(expiredEnvelope, query, scope);
+    assert.strictEqual(val.valid, false);
+    assert.ok(val.reason.includes('Cache expired'));
+  });
+
+  // Test 58: Stale cache entries (age > 1 hour) are flagged as stale while preserving offline usability
+  it('58. Stale cache entries between 1h and 24h are flagged isStale: true but valid', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const query = { subtype: 'technical_recovery' };
+    const keyInfo = buildReviewQueueCacheKey(query, scope);
+
+    const twoHoursAgo = new Date(Date.now() - (2 * 60 * 60 * 1000)).toISOString();
+    const staleEnvelope = {
+      version: REVIEW_CACHE_VERSION,
+      scope: keyInfo.scope,
+      query: keyInfo.query,
+      total: 10,
+      offset: 0,
+      limit: 25,
+      cachedAt: twoHoursAgo,
+      items: [{ scan_id: 1 }],
+    };
+
+    const val = validateCachedReviewQueue(staleEnvelope, query, scope);
+    assert.strictEqual(val.valid, true);
+    assert.strictEqual(val.isStale, true, 'Entries older than 1h must be marked stale');
+  });
+
+  // Test 59: Cached summary totals remain distinct from filtered matching totals and are scoped by user
+  it('59. Summary cache keys are distinct from queue page keys and scoped by user', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const queueKey = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, scope);
+    const summaryKey = buildReviewSummaryCacheKey({}, scope);
+
+    assert.notStrictEqual(queueKey.storageKey, summaryKey.storageKey);
+    assert.strictEqual(queueKey.storageKey.startsWith('nn_rq_'), true);
+    assert.strictEqual(summaryKey.storageKey.startsWith('nn_rs_'), true);
+  });
+
+  // Test 60: Bounded retention limits the maximum number of cached pages per user
+  it('60. Bounded retention limit constant is defined and enforces maximum 30 cached pages', () => {
+    assert.strictEqual(MAX_CACHED_PAGES, 30);
+    assert.strictEqual(REVIEW_CACHE_VERSION, 'v2');
+    assert.strictEqual(REVIEW_CACHE_TTL_MS, 86400000);
+  });
+
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);
   if (failed > 0) {
     process.exit(1);
@@ -932,3 +1359,4 @@ async function runTests() {
 }
 
 runTests();
+

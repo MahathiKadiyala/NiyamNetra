@@ -388,73 +388,315 @@ export async function enqueueConflictResolution({
   return id;
 }
 
-const REVIEW_CACHE_KEY = 'nn_review_queue_cache';
+import { getAccessToken } from '../api/client';
+import {
+  buildReviewQueueCacheKey,
+  buildReviewSummaryCacheKey,
+  createReviewQueueEnvelope,
+  validateCachedReviewQueue,
+  normalizeUserScope,
+  normalizeReviewQueryParams,
+  MAX_CACHED_PAGES,
+  REVIEW_CACHE_VERSION,
+  REVIEW_CACHE_TTL_MS,
+  REVIEW_CACHE_STALE_MS,
+  safeHash,
+} from './reviewCacheKey';
 
-export async function cacheReviewQueue(items, filterKey = 'ALL') {
+export {
+  buildReviewQueueCacheKey,
+  buildReviewSummaryCacheKey,
+  createReviewQueueEnvelope,
+  validateCachedReviewQueue,
+  normalizeUserScope,
+  normalizeReviewQueryParams,
+  MAX_CACHED_PAGES,
+  REVIEW_CACHE_VERSION,
+  REVIEW_CACHE_TTL_MS,
+  REVIEW_CACHE_STALE_MS,
+  safeHash,
+};
+
+async function pruneNativeReviewCache(scopeStr) {
   try {
-    const suffix = filterKey && filterKey !== 'ALL' ? `_${filterKey}` : '';
-    const key = `${REVIEW_CACHE_KEY}${suffix}`;
-    if (isWeb) {
-      globalThis.localStorage?.setItem(key, JSON.stringify(items || []));
-      return;
+    if (isWeb) return;
+    const DIR = pendingDir();
+    const info = await FileSystem.getInfoAsync(DIR);
+    if (!info.exists) return;
+    const files = await FileSystem.readDirectoryAsync(DIR);
+    const prefix = `rq_${REVIEW_CACHE_VERSION}_${scopeStr}_`;
+    const userFiles = files.filter((f) => f.startsWith(prefix));
+    if (userFiles.length <= MAX_CACHED_PAGES) return;
+
+    const entries = [];
+    for (const f of userFiles) {
+      try {
+        const content = await FileSystem.readAsStringAsync(DIR + f);
+        const data = JSON.parse(content);
+        entries.push({ filename: f, cachedAt: Date.parse(data?.cachedAt) || 0 });
+      } catch {
+        entries.push({ filename: f, cachedAt: 0 });
+      }
     }
-    await ensureDir();
-    const cachePath = pendingDir() + `review_queue_cache${suffix}.json`;
-    await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(items || []));
+    entries.sort((a, b) => a.cachedAt - b.cachedAt);
+    const toDelete = entries.slice(0, entries.length - MAX_CACHED_PAGES);
+    for (const item of toDelete) {
+      try {
+        await FileSystem.deleteAsync(DIR + item.filename, { idempotent: true });
+      } catch {}
+    }
   } catch {}
 }
 
-export async function loadCachedReviewQueue(filterKey = 'ALL') {
+function pruneWebReviewCache(scopeStr) {
   try {
-    const suffix = filterKey && filterKey !== 'ALL' ? `_${filterKey}` : '';
-    const key = `${REVIEW_CACHE_KEY}${suffix}`;
+    if (!isWeb || !globalThis.localStorage) return;
+    const prefix = `nn_rq_${REVIEW_CACHE_VERSION}_${scopeStr}_`;
+    const keys = [];
+    for (let i = 0; i < globalThis.localStorage.length; i++) {
+      const k = globalThis.localStorage.key(i);
+      if (k && k.startsWith(prefix)) keys.push(k);
+    }
+    if (keys.length <= MAX_CACHED_PAGES) return;
+
+    const entries = [];
+    for (const k of keys) {
+      try {
+        const raw = globalThis.localStorage.getItem(k);
+        const data = JSON.parse(raw);
+        entries.push({ key: k, cachedAt: Date.parse(data?.cachedAt) || 0 });
+      } catch {
+        entries.push({ key: k, cachedAt: 0 });
+      }
+    }
+    entries.sort((a, b) => a.cachedAt - b.cachedAt);
+    const toDelete = entries.slice(0, entries.length - MAX_CACHED_PAGES);
+    for (const item of toDelete) {
+      globalThis.localStorage.removeItem(item.key);
+    }
+  } catch {}
+}
+
+/**
+ * Cache review queue response scoped to exact query parameters and authenticated user.
+ */
+export async function cacheReviewQueue(payload, queryParams = {}, userScope = null) {
+  try {
+    if (!payload) return false;
+    const scope = normalizeUserScope(userScope || getAccessToken());
+    if (!scope) {
+      // Unauthenticated scope must never cache protected data
+      return false;
+    }
+
+    const keyInfo = buildReviewQueueCacheKey(queryParams, scope);
+    if (!keyInfo) return false;
+
+    const envelope = createReviewQueueEnvelope(payload, keyInfo.query, scope.scopeStr);
+
     if (isWeb) {
-      const raw = globalThis.localStorage?.getItem(key);
-      if (!raw) return filterKey && filterKey !== 'ALL' ? null : [];
-      return JSON.parse(raw);
+      globalThis.localStorage?.setItem(keyInfo.storageKey, JSON.stringify(envelope));
+      pruneWebReviewCache(scope.scopeStr);
+      return true;
     }
+
     await ensureDir();
-    const cachePath = pendingDir() + `review_queue_cache${suffix}.json`;
-    const info = await FileSystem.getInfoAsync(cachePath);
-    if (!info.exists) {
-      return filterKey && filterKey !== 'ALL' ? null : [];
-    }
-    const raw = await FileSystem.readAsStringAsync(cachePath);
-    return JSON.parse(raw);
+    const cachePath = pendingDir() + keyInfo.filename;
+    await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(envelope));
+    await pruneNativeReviewCache(scope.scopeStr);
+    return true;
   } catch {
-    return filterKey && filterKey !== 'ALL' ? null : [];
+    return false;
   }
 }
 
-const REVIEW_SUMMARY_CACHE_KEY = 'nn_review_summary_cache';
-
-export async function cacheReviewSummary(summary) {
+/**
+ * Load cached review queue response matching the exact query and authenticated scope.
+ */
+export async function loadCachedReviewQueue(queryParams = {}, userScope = null) {
   try {
-    if (isWeb) {
-      globalThis.localStorage?.setItem(REVIEW_SUMMARY_CACHE_KEY, JSON.stringify(summary || null));
-      return;
+    const scope = normalizeUserScope(userScope || getAccessToken());
+    if (!scope) {
+      // Missing or unauthenticated identity fails safely
+      return null;
     }
-    await ensureDir();
-    const cachePath = pendingDir() + 'review_summary_cache.json';
-    await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(summary || null));
-  } catch {}
-}
 
-export async function loadCachedReviewSummary() {
-  try {
+    const keyInfo = buildReviewQueueCacheKey(queryParams, scope);
+    if (!keyInfo) return null;
+
+    let raw = null;
     if (isWeb) {
-      const raw = globalThis.localStorage?.getItem(REVIEW_SUMMARY_CACHE_KEY);
-      return raw ? JSON.parse(raw) : null;
+      raw = globalThis.localStorage?.getItem(keyInfo.storageKey);
+    } else {
+      await ensureDir();
+      const cachePath = pendingDir() + keyInfo.filename;
+      const info = await FileSystem.getInfoAsync(cachePath);
+      if (info.exists) {
+        raw = await FileSystem.readAsStringAsync(cachePath);
+      }
     }
-    await ensureDir();
-    const cachePath = pendingDir() + 'review_summary_cache.json';
-    const info = await FileSystem.getInfoAsync(cachePath);
-    if (!info.exists) return null;
-    const raw = await FileSystem.readAsStringAsync(cachePath);
-    return JSON.parse(raw);
+
+    if (!raw) return null;
+
+    let envelope = null;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+
+    const validation = validateCachedReviewQueue(envelope, keyInfo.query, scope);
+    if (!validation.valid) {
+      return null;
+    }
+
+    return {
+      items: Array.isArray(envelope.items) ? envelope.items : [],
+      total: typeof envelope.total === 'number' ? envelope.total : envelope.items?.length || 0,
+      offset: typeof envelope.offset === 'number' ? envelope.offset : keyInfo.query.offset,
+      limit: typeof envelope.limit === 'number' ? envelope.limit : keyInfo.query.limit,
+      cachedAt: envelope.cachedAt,
+      isStale: Boolean(validation.isStale),
+      query: envelope.query,
+      scope: envelope.scope,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Cache review queue summary metrics scoped to authenticated user and summary filters.
+ */
+export async function cacheReviewSummary(summary, params = {}, userScope = null) {
+  try {
+    if (!summary) return false;
+    const scope = normalizeUserScope(userScope || getAccessToken());
+    if (!scope) return false;
+
+    const keyInfo = buildReviewSummaryCacheKey(params, scope);
+    if (!keyInfo) return false;
+
+    const envelope = {
+      version: REVIEW_CACHE_VERSION,
+      scope: scope.scopeStr,
+      params: keyInfo.params,
+      cachedAt: new Date().toISOString(),
+      summary,
+    };
+
+    if (isWeb) {
+      globalThis.localStorage?.setItem(keyInfo.storageKey, JSON.stringify(envelope));
+      return true;
+    }
+
+    await ensureDir();
+    const cachePath = pendingDir() + keyInfo.filename;
+    await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(envelope));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load cached review queue summary metrics matching authenticated scope and parameters.
+ */
+export async function loadCachedReviewSummary(params = {}, userScope = null) {
+  try {
+    const scope = normalizeUserScope(userScope || getAccessToken());
+    if (!scope) return null;
+
+    const keyInfo = buildReviewSummaryCacheKey(params, scope);
+    if (!keyInfo) return null;
+
+    let raw = null;
+    if (isWeb) {
+      raw = globalThis.localStorage?.getItem(keyInfo.storageKey);
+    } else {
+      await ensureDir();
+      const cachePath = pendingDir() + keyInfo.filename;
+      const info = await FileSystem.getInfoAsync(cachePath);
+      if (info.exists) {
+        raw = await FileSystem.readAsStringAsync(cachePath);
+      }
+    }
+
+    if (!raw) return null;
+
+    let envelope = null;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+
+    if (!envelope || envelope.version !== REVIEW_CACHE_VERSION || envelope.scope !== scope.scopeStr) {
+      return null;
+    }
+
+    const cachedTime = Date.parse(envelope.cachedAt);
+    if (isNaN(cachedTime) || Date.now() - cachedTime > REVIEW_CACHE_TTL_MS) {
+      return null;
+    }
+
+    return envelope.summary || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clear cached review queue pages and summaries.
+ * If userScope is provided, clears only entries for that scope; otherwise clears all review caches.
+ */
+export async function clearReviewQueueCache(userScope = null) {
+  try {
+    const scope = normalizeUserScope(userScope || getAccessToken());
+    const scopeStr = scope ? scope.scopeStr : null;
+
+    if (isWeb) {
+      if (!globalThis.localStorage) return;
+      const toRemove = [];
+      for (let i = 0; i < globalThis.localStorage.length; i++) {
+        const k = globalThis.localStorage.key(i);
+        if (!k) continue;
+        if (
+          k.startsWith('nn_rq_') ||
+          k.startsWith('nn_rs_') ||
+          k.startsWith('nn_review_queue_cache') ||
+          k.startsWith('nn_review_summary_cache')
+        ) {
+          if (!scopeStr || k.includes(`_${scopeStr}_`)) {
+            toRemove.push(k);
+          }
+        }
+      }
+      for (const k of toRemove) {
+        globalThis.localStorage.removeItem(k);
+      }
+      return;
+    }
+
+    const DIR = pendingDir();
+    const info = await FileSystem.getInfoAsync(DIR);
+    if (!info.exists) return;
+    const files = await FileSystem.readDirectoryAsync(DIR);
+    for (const f of files) {
+      if (
+        f.startsWith('rq_') ||
+        f.startsWith('rs_') ||
+        f.startsWith('review_queue_cache') ||
+        f.startsWith('review_summary_cache')
+      ) {
+        if (!scopeStr || f.includes(`_${scopeStr}_`)) {
+          try {
+            await FileSystem.deleteAsync(DIR + f, { idempotent: true });
+          } catch {}
+        }
+      }
+    }
+  } catch {}
 }
 
 export async function enqueueRecaptureTaskFulfillment({

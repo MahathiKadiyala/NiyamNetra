@@ -113,8 +113,13 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       setLoadError(null);
 
       await Promise.all([
-        cacheReviewQueue(uniqueScans, filterKey),
-        cacheReviewSummary(summaryData),
+        cacheReviewQueue({
+          items: uniqueScans,
+          total: matchingCount,
+          offset,
+          limit: PAGE_SIZE,
+        }, queueParams),
+        cacheReviewSummary(summaryData, queueParams),
       ]);
     } catch (err) {
       if (requestId !== activeRequestIdRef.current) {
@@ -137,25 +142,20 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
         message = typeof detail === 'string' ? detail : 'Invalid filter parameters specified.';
       }
 
-      // Offline fallback: load cached review items for this filter and cached summary
+      // Offline fallback: load cached review items for this EXACT query and cached summary
       // NEVER fall back to cache on validation (422) or auth (401/403) errors.
       if (errorType === 'network') {
-        const [cachedItems, cachedSummary] = await Promise.all([
-          loadCachedReviewQueue(filterKey),
-          loadCachedReviewSummary(),
+        const [cachedData, cachedSummary] = await Promise.all([
+          loadCachedReviewQueue(queueParams),
+          loadCachedReviewSummary(queueParams),
         ]);
 
+        const cachedItems = Array.isArray(cachedData) ? cachedData : cachedData?.items;
         if (cachedItems && cachedItems.length > 0) {
-          let filtered = cachedItems;
-          if (statusFilter !== 'ALL') {
-            filtered = filtered.filter((x) => (x.review_status || x.status) === statusFilter);
-          }
-          if (reasonFilter !== 'ALL') {
-            filtered = filtered.filter((x) => x.reasons?.some((r) => r.type === reasonFilter));
-          }
-          setItems(filtered);
-          setTotalMatching(filtered.length);
-          setSummary(cachedSummary);
+          const cachedTotal = typeof cachedData?.total === 'number' ? cachedData.total : cachedItems.length;
+          setItems(cachedItems);
+          setTotalMatching(cachedTotal);
+          setSummary(cachedSummary?.summary || cachedSummary);
           setIsOffline(true);
           setLoadError(null);
           return;
