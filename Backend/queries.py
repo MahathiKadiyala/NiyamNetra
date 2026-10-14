@@ -130,44 +130,243 @@ def admin_stats(db: Session, start: date, end: date, area: str | None = None):
     return d
 
 
-def review_queue_size(db: Session, area: str | None = None) -> int:
-    """Everything a human still has to look at, counted the same way the
-    review endpoint lists it, so the badge and the page can never disagree.
+def get_canonical_queue_metrics(
+    db: Session,
+    user: User | None = None,
+    area: str | None = None,
+    status_filter: str | None = None,
+) -> dict:
+    """Calculate database-authoritative review queue counts across actionable categories.
 
-    Low-confidence includes NULL confidence (e.g. OCR.space reports no
-    per-line confidence): unknown confidence must be reviewed, not skipped.
+    Entity: Scans (distinct packaging units under submitted inspections).
+    Policy:
+      - Submitted inspections only (draft inspections belong to inspector field workflow).
+      - Live scans only (duplicate_of IS NULL).
+      - Total counts distinct actionable scans (never sums overlapping categories).
+      - Passing rule checks with NULL confidence are NOT treated as low-confidence defects.
     """
-    na_q = select(func.count()).select_from(Scan).where(Scan.overall_result == "not_assessed", LIVE)
-    low_q = (
-        select(func.count())
-        .select_from(Finding)
-        .where(or_(Finding.confidence < 0.60, Finding.confidence.is_(None)),
-               Finding.human_verdict.is_(None))
+    from models import AuditLog, Finding, Inspection, Scan, ScanImage, Store
+    from sqlalchemy import and_, or_, select, func
+
+    # Base query for submitted live scans
+    base_scans = (
+        db.query(Scan)
+        .join(Inspection, Inspection.id == Scan.inspection_id)
+        .filter(
+            Inspection.status == "submitted",
+            Scan.duplicate_of.is_(None),
+        )
     )
-    off_q = select(func.count()).select_from(Inspection).where(Inspection.edited_offline.is_(True))
+
+    if user and getattr(user, "role", None) != "admin":
+        base_scans = base_scans.filter(Inspection.user_id == user.id)
 
     if area and area.strip().lower() != "all":
         a_str = area.strip()
-        na_q = (
-            na_q.join(Inspection, Inspection.id == Scan.inspection_id)
-            .join(Store, Store.id == Inspection.store_id)
-            .where(or_(Store.city.ilike(f"%{a_str}%"), Store.district.ilike(f"%{a_str}%")))
-        )
-        low_q = (
-            low_q.join(Scan, Scan.id == Finding.scan_id)
-            .join(Inspection, Inspection.id == Scan.inspection_id)
-            .join(Store, Store.id == Inspection.store_id)
-            .where(or_(Store.city.ilike(f"%{a_str}%"), Store.district.ilike(f"%{a_str}%")))
-        )
-        off_q = (
-            off_q.join(Store, Store.id == Inspection.store_id)
-            .where(or_(Store.city.ilike(f"%{a_str}%"), Store.district.ilike(f"%{a_str}%")))
+        base_scans = base_scans.join(Store, Store.id == Inspection.store_id).filter(
+            or_(Store.city.ilike(f"%{a_str}%"), Store.district.ilike(f"%{a_str}%"))
         )
 
-    na_scans = db.scalar(na_q) or 0
-    low_conf = db.scalar(low_q) or 0
-    offline_edits = db.scalar(off_q) or 0
-    return na_scans + low_conf + offline_edits
+    # Resolution status via audit log:
+    resolved_insp_subq = (
+        select(AuditLog.inspection_id)
+        .filter(AuditLog.action.in_(["review_resolved", "review_dismissed"]))
+    )
+    resolved_scan_subq = (
+        select(AuditLog.scan_id)
+        .filter(AuditLog.action.in_(["review_resolved", "review_dismissed"]))
+    )
+    is_resolved_cond = or_(
+        Inspection.id.in_(resolved_insp_subq),
+        Scan.id.in_(resolved_scan_subq),
+    )
+
+    # In-review status via audit log:
+    in_review_insp_subq = (
+        select(AuditLog.inspection_id)
+        .filter(AuditLog.action.in_(["review_started", "review_escalated"]))
+    )
+    in_review_scan_subq = (
+        select(AuditLog.scan_id)
+        .filter(AuditLog.action.in_(["review_started", "review_escalated", "finding_overridden"]))
+    )
+    is_in_review_cond = and_(
+        ~is_resolved_cond,
+        or_(
+            Inspection.id.in_(in_review_insp_subq),
+            Scan.id.in_(in_review_scan_subq),
+        ),
+    )
+
+    # Low-confidence subquery: finding has confidence < 0.60 (and NOT null), unresolved
+    low_conf_scan_ids = (
+        select(Finding.scan_id)
+        .filter(
+            Finding.confidence.is_not(None),
+            Finding.confidence < 0.60,
+            Finding.human_verdict.is_(None),
+        )
+    )
+
+    # Review triggers:
+    review_trigger_cond = or_(
+        Scan.overall_result.in_(["violation", "not_assessed"]),
+        Inspection.edited_offline.is_(True),
+        Scan.id.in_(low_conf_scan_ids),
+    )
+
+    review_scans = base_scans.filter(review_trigger_cond)
+
+    # Status filtering on review scans
+    if status_filter == "OPEN":
+        filtered_scans = review_scans.filter(~is_resolved_cond, ~is_in_review_cond)
+    elif status_filter == "IN_REVIEW":
+        filtered_scans = review_scans.filter(is_in_review_cond)
+    elif status_filter == "RESOLVED":
+        filtered_scans = review_scans.filter(is_resolved_cond)
+    else:
+        filtered_scans = review_scans
+
+    # 1. Total distinct actionable scans in queue
+    total_count = filtered_scans.with_entities(func.count(func.distinct(Scan.id))).scalar() or 0
+
+    # 2. Violations pending: distinct scans in queue with violation result
+    violations_count = (
+        filtered_scans.filter(Scan.overall_result == "violation")
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # 3. Incomplete / Not assessed: distinct scans in queue with not_assessed result
+    not_assessed_scans = filtered_scans.filter(Scan.overall_result == "not_assessed")
+    not_assessed_count = not_assessed_scans.with_entities(func.count(func.distinct(Scan.id))).scalar() or 0
+
+    # 4. Low confidence: distinct scans in queue having genuine low-confidence unresolved findings
+    low_conf_count = (
+        filtered_scans.filter(Scan.id.in_(low_conf_scan_ids))
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # 5. Offline edits: distinct scans in queue from offline-edited inspections
+    offline_edits_count = (
+        filtered_scans.filter(Inspection.edited_offline.is_(True))
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # Subcategory breakdowns:
+    # Technical OCR/provider recovery
+    technical_error_scan_ids = (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "not_assessed",
+            or_(
+                Finding.reason.ilike("%ocr%"),
+                Finding.reason.ilike("%provider%"),
+                Finding.reason.ilike("%technical%"),
+                Finding.reason.ilike("%timeout%"),
+                Finding.reason.ilike("%service unavailable%"),
+                Finding.reason.ilike("%failed to initialize%"),
+            ),
+        )
+    )
+    technical_recovery_count = (
+        not_assessed_scans.filter(Scan.id.in_(technical_error_scan_ids))
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # Recapture required: not_assessed scans with 0 images or missing evidence/blur/coverage guidance
+    scans_with_images = select(ScanImage.scan_id)
+    recapture_guidance_scan_ids = (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "not_assessed",
+            or_(
+                Finding.reason.ilike("%recapture%"),
+                Finding.reason.ilike("%missing%"),
+                Finding.reason.ilike("%coverage%"),
+                Finding.reason.ilike("%unclear%"),
+                Finding.reason.ilike("%blur%"),
+            ),
+        )
+    )
+    recapture_required_count = (
+        not_assessed_scans.filter(
+            or_(
+                ~Scan.id.in_(scans_with_images),
+                Scan.id.in_(recapture_guidance_scan_ids),
+            )
+        )
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # Violations breakdown: unconfirmed awaiting adjudication vs confirmed awaiting enforcement
+    scans_with_unconfirmed = (
+        select(Finding.scan_id)
+        .filter(
+            Finding.engine_verdict == "fail",
+            Finding.human_verdict.is_(None),
+        )
+    )
+    unconfirmed_violations_count = (
+        filtered_scans.filter(
+            Scan.overall_result == "violation",
+            Scan.id.in_(scans_with_unconfirmed),
+        )
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+    confirmed_violations_count = (
+        filtered_scans.filter(
+            Scan.overall_result == "violation",
+            ~Scan.id.in_(scans_with_unconfirmed),
+        )
+        .with_entities(func.count(func.distinct(Scan.id)))
+        .scalar() or 0
+    )
+
+    # Resolved count
+    resolved_scans_q = (
+        base_scans.filter(
+            review_trigger_cond,
+            is_resolved_cond,
+        )
+    )
+    adjudicated_resolved_count = resolved_scans_q.with_entities(func.count(func.distinct(Scan.id))).scalar() or 0
+
+    # Draft inspections in progress (distinct inspections, not in officer review queue)
+    draft_q = db.query(func.count(Inspection.id)).filter(Inspection.status == "draft")
+    if user and getattr(user, "role", None) != "admin":
+        draft_q = draft_q.filter(Inspection.user_id == user.id)
+    draft_inspections_count = draft_q.scalar() or 0
+
+    return {
+        "total": total_count,
+        "violations_pending": violations_count,
+        "not_assessed": not_assessed_count,
+        "low_confidence": low_conf_count,
+        "offline_edits": offline_edits_count,
+        "breakdown": {
+            "technical_recovery": technical_recovery_count,
+            "recapture_required": recapture_required_count,
+            "unconfirmed_violations": unconfirmed_violations_count,
+            "confirmed_violations": confirmed_violations_count,
+            "adjudicated_resolved": adjudicated_resolved_count,
+            "draft_inspections": draft_inspections_count,
+        },
+    }
+
+
+def review_queue_size(db: Session, area: str | None = None) -> int:
+    """Everything a human still has to look at, counted the same way the
+    review endpoint lists it, so the badge and the page can never disagree.
+    Counts unique actionable scans under submitted inspections.
+    """
+    metrics = get_canonical_queue_metrics(db, area=area, status_filter="OPEN")
+    return metrics["total"]
 
 
 # --- Query 5: violations by check, for the bar chart ---

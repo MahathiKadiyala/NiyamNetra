@@ -25,7 +25,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, or_
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from audit import append_audit
@@ -89,7 +89,6 @@ class ConflictResolutionRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # 3. Helper — build review item from DB rows
 # ---------------------------------------------------------------------------
-
 def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> list[dict]:
     """Determine why this inspection/scan needs review."""
     reasons = []
@@ -97,22 +96,42 @@ def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> lis
     # 1. Not assessed scans
     if scan.overall_result == "not_assessed":
         na_checks = [f for f in findings if f.engine_verdict == "not_assessed"]
-        reasons.append({
-            "type": "not_assessed",
-            "severity": "major",
-            "detail": f"{len(na_checks)} of {scan.checks_total} checks not assessed",
-            "affected_checks": [f.check_id for f in na_checks],
-        })
+        # Check for technical error
+        tech_errs = [
+            f for f in na_checks
+            if f.reason and any(
+                k in f.reason.lower()
+                for k in ("ocr", "provider", "technical", "timeout", "unavailable", "failed to initialize")
+            )
+        ]
+        if tech_errs:
+            reasons.append({
+                "type": "not_assessed",
+                "subtype": "technical_recovery",
+                "severity": "major",
+                "detail": f"Technical OCR/provider error: {tech_errs[0].reason[:120]}",
+                "affected_checks": [f.check_id for f in tech_errs],
+            })
+        else:
+            reasons.append({
+                "type": "not_assessed",
+                "subtype": "incomplete_coverage",
+                "severity": "major",
+                "detail": f"{len(na_checks)} of {scan.checks_total} checks not assessed",
+                "affected_checks": [f.check_id for f in na_checks],
+            })
 
-    # 2. Low confidence findings
-    low_conf = [f for f in findings
-                if (f.confidence is not None and f.confidence < 0.60)
-                or f.confidence is None]
+    # 2. Low confidence findings (genuine low confidence on unresolved checks only)
+    low_conf = [
+        f for f in findings
+        if f.confidence is not None and f.confidence < 0.60
+        and f.human_verdict is None
+    ]
     if low_conf:
         reasons.append({
             "type": "low_confidence",
             "severity": "minor",
-            "detail": f"{len(low_conf)} findings with low or unknown confidence",
+            "detail": f"{len(low_conf)} findings with low confidence (< 60%)",
             "affected_checks": [f.check_id for f in low_conf],
         })
 
@@ -124,15 +143,27 @@ def _review_reason(scan: Scan, findings: list[Finding], insp: Inspection) -> lis
             "detail": f"Inspection edited offline; clock skew {insp.clock_skew_seconds or 0}s",
         })
 
-    # 4. Violations requiring officer confirmation
-    violations = [f for f in findings if f.engine_verdict == "fail"
-                  and f.human_verdict is None]
-    if violations:
+    # 4. Violations requiring officer confirmation / enforcement action
+    unconfirmed_violations = [
+        f for f in findings
+        if (f.human_verdict or f.engine_verdict) == "fail"
+        and f.human_verdict is None
+    ]
+    if unconfirmed_violations:
         reasons.append({
             "type": "violation",
+            "subtype": "unconfirmed_violation",
             "severity": "critical",
-            "detail": f"{len(violations)} unconfirmed violations",
-            "affected_checks": [f.check_id for f in violations],
+            "detail": f"{len(unconfirmed_violations)} unconfirmed violations awaiting officer review",
+            "affected_checks": [f.check_id for f in unconfirmed_violations],
+        })
+    elif scan.overall_result == "violation":
+        reasons.append({
+            "type": "violation",
+            "subtype": "confirmed_violation",
+            "severity": "critical",
+            "detail": "Confirmed legal violation awaiting enforcement action",
+            "affected_checks": [f.check_id for f in findings if (f.human_verdict or f.engine_verdict) == "fail"],
         })
 
     return reasons
@@ -155,7 +186,15 @@ def _build_review_item(insp: Inspection, scan: Scan,
 
     # Build finding summaries
     finding_summaries = []
+    unconfirmed_count = 0
     for f in findings:
+        needs_rev = (
+            f.engine_verdict == "not_assessed"
+            or (f.engine_verdict == "fail" and f.human_verdict is None)
+            or (f.confidence is not None and f.confidence < 0.60 and f.human_verdict is None)
+        )
+        if needs_rev:
+            unconfirmed_count += 1
         finding_summaries.append({
             "id": f.id,
             "check_id": f.check_id,
@@ -169,12 +208,7 @@ def _build_review_item(insp: Inspection, scan: Scan,
             "observed": f.observed,
             "required": f.required,
             "citation": f.citation,
-            "needs_review": (
-                f.engine_verdict == "not_assessed"
-                or f.engine_verdict == "fail" and f.human_verdict is None
-                or (f.confidence is not None and f.confidence < 0.60)
-                or f.confidence is None
-            ),
+            "needs_review": needs_rev,
         })
 
     store_name = None
@@ -208,6 +242,8 @@ def _build_review_item(insp: Inspection, scan: Scan,
         "review_status": review_status,
         "priority": priority,
         "review_reasons": reasons,
+        "reasons": reasons,
+        "unconfirmed_count": unconfirmed_count,
         "checks_total": scan.checks_total,
         "checks_assessed": scan.checks_assessed,
         "findings": finding_summaries,
@@ -237,15 +273,17 @@ def get_review_queue(
 ):
     """Return the officer review queue with filtering, pagination, and priority ordering.
 
+    Only submitted inspections enter the officer review queue (drafts remain in inspector field flow).
     Items enter this queue when:
-    - A scan has overall_result == 'not_assessed'
-    - A finding has low/unknown confidence (< 0.60 or NULL)
+    - A scan has overall_result == 'violation' (unconfirmed / confirmed violation)
+    - A scan has overall_result == 'not_assessed' (incomplete coverage / technical OCR recovery)
     - An inspection was edited offline
-    - A violation exists but has no human_verdict confirmation
+    - A scan has genuine low-confidence findings (< 0.60 on unresolved checks)
     """
     from queries import LIVE
+    from sqlalchemy import select
 
-    # Build the base query for reviewable scans
+    # Base query for reviewable scans under submitted inspections
     q = (
         db.query(Scan, Inspection)
         .join(Inspection, Inspection.id == Scan.inspection_id)
@@ -253,7 +291,10 @@ def get_review_queue(
             joinedload(Inspection.store),
             joinedload(Inspection.inspector),
         )
-        .filter(LIVE)
+        .filter(
+            Inspection.status == "submitted",
+            LIVE,
+        )
     )
 
     # Non-admin sees only their own inspections
@@ -273,6 +314,16 @@ def get_review_queue(
             or_(Store.city.ilike(f"%{a}%"), Store.district.ilike(f"%{a}%"))
         )
 
+    # Low-confidence subquery
+    low_conf_scan_subq = (
+        select(Finding.scan_id)
+        .filter(
+            Finding.confidence.is_not(None),
+            Finding.confidence < 0.60,
+            Finding.human_verdict.is_(None),
+        )
+    )
+
     # Reason-based filtering
     if reason and reason.lower() != "all":
         if reason == "not_assessed":
@@ -282,22 +333,57 @@ def get_review_queue(
         elif reason == "offline_edit":
             q = q.filter(Inspection.edited_offline.is_(True))
         elif reason == "low_confidence":
-            # Join to findings with low confidence
-            q = q.join(Finding, Finding.scan_id == Scan.id).filter(
-                or_(Finding.confidence < 0.60, Finding.confidence.is_(None)),
-                Finding.human_verdict.is_(None),
+            q = q.filter(Scan.id.in_(low_conf_scan_subq))
+    else:
+        # Default: all review-worthy items
+        q = q.filter(
+            or_(
+                Scan.overall_result.in_(["violation", "not_assessed"]),
+                Inspection.edited_offline.is_(True),
+                Scan.id.in_(low_conf_scan_subq),
             )
-        # For "conflict" we'd need the aggregation layer — handled below
+        )
 
-    # Execute query — get review-worthy items
-    # Filter: scans that have not_assessed result, or have unconfirmed violations,
-    # or belong to offline-edited inspections, or have low-confidence findings.
-    if not reason or reason.lower() == "all":
-        # Get all reviewable scans
-        na_cond = Scan.overall_result == "not_assessed"
-        violation_cond = Scan.overall_result == "violation"
-        offline_cond = Inspection.edited_offline.is_(True)
-        q = q.filter(or_(na_cond, violation_cond, offline_cond))
+    # Audit log resolution & in-review status
+    resolved_insp_subq = (
+        select(AuditLog.inspection_id)
+        .filter(AuditLog.action.in_(["review_resolved", "review_dismissed"]))
+    )
+    resolved_scan_subq = (
+        select(AuditLog.scan_id)
+        .filter(AuditLog.action.in_(["review_resolved", "review_dismissed"]))
+    )
+    is_resolved_cond = or_(
+        Inspection.id.in_(resolved_insp_subq),
+        Scan.id.in_(resolved_scan_subq),
+    )
+
+    in_review_insp_subq = (
+        select(AuditLog.inspection_id)
+        .filter(AuditLog.action.in_(["review_started", "review_escalated"]))
+    )
+    in_review_scan_subq = (
+        select(AuditLog.scan_id)
+        .filter(AuditLog.action.in_(["review_started", "review_escalated", "finding_overridden"]))
+    )
+    is_in_review_cond = and_(
+        ~is_resolved_cond,
+        or_(
+            Inspection.id.in_(in_review_insp_subq),
+            Scan.id.in_(in_review_scan_subq),
+        ),
+    )
+
+    # Apply status filter at SQL query level
+    if status_filter == "OPEN":
+        q = q.filter(~is_resolved_cond, ~is_in_review_cond)
+    elif status_filter == "IN_REVIEW":
+        q = q.filter(is_in_review_cond)
+    elif status_filter == "RESOLVED":
+        q = q.filter(is_resolved_cond)
+
+    # Total matching count
+    total_matching = q.with_entities(func.count(func.distinct(Scan.id))).scalar() or 0
 
     rows = (
         q.order_by(Inspection.inspection_date.desc(), Scan.id.desc())
@@ -306,7 +392,39 @@ def get_review_queue(
         .all()
     )
 
-    # Deduplicate (the join may fan out)
+    # Batch query resolution status for fetched items
+    scan_ids = [s.id for s, _ in rows]
+    insp_ids = list({i.id for _, i in rows})
+
+    resolved_scan_set = set()
+    in_review_scan_set = set()
+    if scan_ids or insp_ids:
+        audit_rows = (
+            db.query(AuditLog)
+            .filter(
+                or_(
+                    AuditLog.scan_id.in_(scan_ids),
+                    AuditLog.inspection_id.in_(insp_ids),
+                ),
+                AuditLog.action.in_([
+                    "review_started", "review_resolved", "review_escalated",
+                    "review_dismissed", "finding_overridden",
+                ]),
+            )
+            .order_by(AuditLog.seq.asc())
+            .all()
+        )
+        for a in audit_rows:
+            target_scans = [a.scan_id] if a.scan_id else [s.id for s, insp in rows if insp.id == a.inspection_id]
+            for sid in target_scans:
+                if a.action in ("review_resolved", "review_dismissed"):
+                    resolved_scan_set.add(sid)
+                    in_review_scan_set.discard(sid)
+                elif a.action in ("review_started", "review_escalated", "finding_overridden"):
+                    if sid not in resolved_scan_set:
+                        in_review_scan_set.add(sid)
+
+    # Deduplicate (prevent fan out)
     seen_scans = set()
     items = []
     for scan, insp in rows:
@@ -316,27 +434,12 @@ def get_review_queue(
 
         findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
 
-        # Determine review status from audit log
-        review_status = "OPEN"
-        latest_review = (
-            db.query(AuditLog)
-            .filter(
-                AuditLog.scan_id == scan.id,
-                AuditLog.action.in_(["review_started", "review_resolved", "review_escalated"]),
-            )
-            .order_by(AuditLog.seq.desc())
-            .first()
-        )
-        if latest_review:
-            if latest_review.action == "review_resolved":
-                review_status = "RESOLVED"
-            elif latest_review.action in ("review_started",):
-                review_status = "IN_REVIEW"
-
-        # Filter by status if requested
-        if status_filter and status_filter != "ALL":
-            if review_status != status_filter:
-                continue
+        if scan.id in resolved_scan_set:
+            review_status = "RESOLVED"
+        elif scan.id in in_review_scan_set:
+            review_status = "IN_REVIEW"
+        else:
+            review_status = "OPEN"
 
         item = _build_review_item(insp, scan, findings, review_status)
 
@@ -353,7 +456,7 @@ def get_review_queue(
     total_resolved = sum(1 for i in items if i["review_status"] == "RESOLVED")
 
     return {
-        "total": len(items),
+        "total": total_matching,
         "offset": offset,
         "limit": limit,
         "summary": {
@@ -372,57 +475,14 @@ def get_review_queue(
 
 @router.get("/queue/summary")
 def get_review_queue_summary(
+    area: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None),
     user: User = Depends(require_inspector),
     db: Session = Depends(get_db),
 ):
-    """Return a summary count of review queue items by category."""
-    from queries import LIVE
-
-    base = db.query(Scan).join(
-        Inspection, Inspection.id == Scan.inspection_id
-    ).filter(LIVE)
-
-    if user.role != "admin":
-        base = base.filter(Inspection.user_id == user.id)
-
-    not_assessed_count = base.filter(
-        Scan.overall_result == "not_assessed"
-    ).count()
-
-    violation_count = base.filter(
-        Scan.overall_result == "violation"
-    ).count()
-
-    offline_count = db.query(Inspection).filter(
-        Inspection.edited_offline.is_(True)
-    )
-    if user.role != "admin":
-        offline_count = offline_count.filter(Inspection.user_id == user.id)
-    offline_count = offline_count.count()
-
-    low_conf_count = (
-        db.query(func.count(Finding.id))
-        .join(Scan, Scan.id == Finding.scan_id)
-        .join(Inspection, Inspection.id == Scan.inspection_id)
-        .filter(
-            or_(Finding.confidence < 0.60, Finding.confidence.is_(None)),
-            Finding.human_verdict.is_(None),
-            Scan.duplicate_of.is_(None),
-        )
-    )
-    if user.role != "admin":
-        low_conf_count = low_conf_count.filter(Inspection.user_id == user.id)
-    low_conf_count = low_conf_count.scalar() or 0
-
-    total = not_assessed_count + violation_count + offline_count + low_conf_count
-
-    return {
-        "total": total,
-        "not_assessed": not_assessed_count,
-        "violations_pending": violation_count,
-        "offline_edits": offline_count,
-        "low_confidence": low_conf_count,
-    }
+    """Return database-authoritative summary metrics for the review queue."""
+    from queries import get_canonical_queue_metrics
+    return get_canonical_queue_metrics(db, user=user, area=area, status_filter=status_filter)
 
 
 # ---------------------------------------------------------------------------

@@ -441,15 +441,43 @@ def review_queue_items(limit: int = Query(default=200, ge=1, le=500),
     from models import Inspection
     from queries import LIVE
     from sqlalchemy import or_
-    na_scans = (db.query(Scan).filter(
-        Scan.overall_result == "not_assessed", LIVE)
-        .order_by(Scan.id.desc()).limit(limit).all())
-    low_conf = (db.query(Finding).filter(
-        or_(Finding.confidence < 0.60, Finding.confidence.is_(None)),
-        Finding.human_verdict.is_(None))
-        .order_by(Finding.id.desc()).limit(limit).all())
-    offline = (db.query(Inspection).filter(Inspection.edited_offline.is_(True))
-               .order_by(Inspection.id.desc()).limit(limit).all())
+    na_scans = (
+        db.query(Scan)
+        .join(Inspection, Inspection.id == Scan.inspection_id)
+        .filter(
+            Inspection.status == "submitted",
+            Scan.overall_result == "not_assessed",
+            LIVE,
+        )
+        .order_by(Scan.id.desc())
+        .limit(limit)
+        .all()
+    )
+    low_conf = (
+        db.query(Finding)
+        .join(Scan, Scan.id == Finding.scan_id)
+        .join(Inspection, Inspection.id == Scan.inspection_id)
+        .filter(
+            Inspection.status == "submitted",
+            Finding.confidence.is_not(None),
+            Finding.confidence < 0.60,
+            Finding.human_verdict.is_(None),
+            LIVE,
+        )
+        .order_by(Finding.id.desc())
+        .limit(limit)
+        .all()
+    )
+    offline = (
+        db.query(Inspection)
+        .filter(
+            Inspection.status == "submitted",
+            Inspection.edited_offline.is_(True),
+        )
+        .order_by(Inspection.id.desc())
+        .limit(limit)
+        .all()
+    )
     return {
         "limit": limit,
         "not_assessed_scans": [
