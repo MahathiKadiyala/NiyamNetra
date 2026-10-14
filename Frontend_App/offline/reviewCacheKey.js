@@ -65,13 +65,45 @@ export function decodeTokenScope(token) {
   }
 }
 
+let currentSessionGeneration = 1;
+
+/**
+ * Return current review cache session generation identifier.
+ * Incremented on logout, session expiration, login, or explicit cache clearance.
+ */
+export function getReviewCacheSessionId() {
+  return currentSessionGeneration;
+}
+
+/**
+ * Bump review cache session generation identifier.
+ * Immediately invalidates any in-flight cache writes from previous session state.
+ */
+export function bumpReviewCacheSessionId() {
+  currentSessionGeneration++;
+  return currentSessionGeneration;
+}
+
+/**
+ * Reset session generation to initial state (for testing).
+ */
+export function resetReviewCacheSession() {
+  currentSessionGeneration = 1;
+  return currentSessionGeneration;
+}
+
 /**
  * Canonicalize and normalize authenticated principal scope.
- * Accepts { userId, role }, scope string 'u1_inspector', or JWT string.
+ * Accepts { userId, role }, session binding { scope: ... }, scope string 'u1_inspector', or JWT string.
  * Fails safely (returns null) if identity cannot be established.
  */
 export function normalizeUserScope(userScope) {
   if (!userScope) return null;
+
+  // Unwrap session binding object if passed
+  if (typeof userScope === 'object' && userScope.scope) {
+    return normalizeUserScope(userScope.scope);
+  }
 
   if (typeof userScope === 'string') {
     if (userScope.includes('.')) {

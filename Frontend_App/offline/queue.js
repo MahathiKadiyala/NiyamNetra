@@ -401,6 +401,9 @@ import {
   REVIEW_CACHE_TTL_MS,
   REVIEW_CACHE_STALE_MS,
   safeHash,
+  getReviewCacheSessionId,
+  bumpReviewCacheSessionId,
+  resetReviewCacheSession,
 } from './reviewCacheKey';
 
 export {
@@ -415,6 +418,9 @@ export {
   REVIEW_CACHE_TTL_MS,
   REVIEW_CACHE_STALE_MS,
   safeHash,
+  getReviewCacheSessionId,
+  bumpReviewCacheSessionId,
+  resetReviewCacheSession,
 };
 
 async function pruneNativeReviewCache(scopeStr) {
@@ -479,31 +485,53 @@ function pruneWebReviewCache(scopeStr) {
 
 /**
  * Cache review queue response scoped to exact query parameters and authenticated user.
+ * Revalidates session scope and generation to prevent late writes after logout or account switch.
  */
-export async function cacheReviewQueue(payload, queryParams = {}, userScope = null) {
+export async function cacheReviewQueue(payload, queryParams = {}, sessionBinding = null) {
   try {
     if (!payload) return false;
-    const scope = normalizeUserScope(userScope || getAccessToken());
-    if (!scope) {
+
+    // Current active authenticated session at time of write
+    const currentScope = normalizeUserScope(getAccessToken());
+    if (!currentScope) {
       // Unauthenticated scope must never cache protected data
       return false;
     }
 
-    const keyInfo = buildReviewQueueCacheKey(queryParams, scope);
+    const currentSessionId = getReviewCacheSessionId();
+
+    // Revalidate session binding if provided by initiating request
+    if (sessionBinding) {
+      // 1. Check session generation (bumped on logout/expiration/login/clear)
+      if (
+        sessionBinding.sessionId !== undefined &&
+        sessionBinding.sessionId !== currentSessionId
+      ) {
+        return false;
+      }
+
+      // 2. Check principal & role scope identity
+      const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
+      if (!boundScope || boundScope.scopeStr !== currentScope.scopeStr) {
+        return false;
+      }
+    }
+
+    const keyInfo = buildReviewQueueCacheKey(queryParams, currentScope);
     if (!keyInfo) return false;
 
-    const envelope = createReviewQueueEnvelope(payload, keyInfo.query, scope.scopeStr);
+    const envelope = createReviewQueueEnvelope(payload, keyInfo.query, currentScope.scopeStr);
 
     if (isWeb) {
       globalThis.localStorage?.setItem(keyInfo.storageKey, JSON.stringify(envelope));
-      pruneWebReviewCache(scope.scopeStr);
+      pruneWebReviewCache(currentScope.scopeStr);
       return true;
     }
 
     await ensureDir();
     const cachePath = pendingDir() + keyInfo.filename;
     await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(envelope));
-    await pruneNativeReviewCache(scope.scopeStr);
+    await pruneNativeReviewCache(currentScope.scopeStr);
     return true;
   } catch {
     return false;
@@ -567,19 +595,39 @@ export async function loadCachedReviewQueue(queryParams = {}, userScope = null) 
 
 /**
  * Cache review queue summary metrics scoped to authenticated user and summary filters.
+ * Revalidates session scope and generation to prevent late writes.
  */
-export async function cacheReviewSummary(summary, params = {}, userScope = null) {
+export async function cacheReviewSummary(summary, params = {}, sessionBinding = null) {
   try {
     if (!summary) return false;
-    const scope = normalizeUserScope(userScope || getAccessToken());
-    if (!scope) return false;
 
-    const keyInfo = buildReviewSummaryCacheKey(params, scope);
+    // Current active authenticated session at time of write
+    const currentScope = normalizeUserScope(getAccessToken());
+    if (!currentScope) return false;
+
+    const currentSessionId = getReviewCacheSessionId();
+
+    // Revalidate session binding if provided by initiating request
+    if (sessionBinding) {
+      if (
+        sessionBinding.sessionId !== undefined &&
+        sessionBinding.sessionId !== currentSessionId
+      ) {
+        return false;
+      }
+
+      const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
+      if (!boundScope || boundScope.scopeStr !== currentScope.scopeStr) {
+        return false;
+      }
+    }
+
+    const keyInfo = buildReviewSummaryCacheKey(params, currentScope);
     if (!keyInfo) return false;
 
     const envelope = {
       version: REVIEW_CACHE_VERSION,
-      scope: scope.scopeStr,
+      scope: currentScope.scopeStr,
       params: keyInfo.params,
       cachedAt: new Date().toISOString(),
       summary,
@@ -648,12 +696,19 @@ export async function loadCachedReviewSummary(params = {}, userScope = null) {
 
 /**
  * Clear cached review queue pages and summaries.
- * If userScope is provided, clears only entries for that scope; otherwise clears all review caches.
+ * If userScope is provided, clears entries for that scope plus all legacy unscoped entries.
+ * If userScope is not provided, clears all review queue and summary caches.
+ * Increments review session generation to invalidate any in-flight cache writes.
+ * Preserves all unrelated application data (nn_access, nn_install_id, manifests, etc.).
  */
-export async function clearReviewQueueCache(userScope = null) {
+export async function clearReviewQueueCache(userScope = null, options = {}) {
   try {
+    // Invalidate in-flight writes immediately
+    bumpReviewCacheSessionId();
+
     const scope = normalizeUserScope(userScope || getAccessToken());
     const scopeStr = scope ? scope.scopeStr : null;
+    const { legacyOnly = false } = options;
 
     if (isWeb) {
       if (!globalThis.localStorage) return;
@@ -661,12 +716,17 @@ export async function clearReviewQueueCache(userScope = null) {
       for (let i = 0; i < globalThis.localStorage.length; i++) {
         const k = globalThis.localStorage.key(i);
         if (!k) continue;
-        if (
-          k.startsWith('nn_rq_') ||
-          k.startsWith('nn_rs_') ||
+
+        const isLegacyKey =
           k.startsWith('nn_review_queue_cache') ||
-          k.startsWith('nn_review_summary_cache')
-        ) {
+          k.startsWith('nn_review_summary_cache');
+        const isScopedKey =
+          k.startsWith('nn_rq_') ||
+          k.startsWith('nn_rs_');
+
+        if (isLegacyKey) {
+          toRemove.push(k);
+        } else if (isScopedKey && !legacyOnly) {
           if (!scopeStr || k.includes(`_${scopeStr}_`)) {
             toRemove.push(k);
           }
@@ -683,17 +743,26 @@ export async function clearReviewQueueCache(userScope = null) {
     if (!info.exists) return;
     const files = await FileSystem.readDirectoryAsync(DIR);
     for (const f of files) {
-      if (
-        f.startsWith('rq_') ||
-        f.startsWith('rs_') ||
+      const isLegacyFile =
         f.startsWith('review_queue_cache') ||
-        f.startsWith('review_summary_cache')
-      ) {
+        f.startsWith('review_summary_cache');
+      const isScopedFile =
+        f.startsWith('rq_') ||
+        f.startsWith('rs_');
+
+      let remove = false;
+      if (isLegacyFile) {
+        remove = true;
+      } else if (isScopedFile && !legacyOnly) {
         if (!scopeStr || f.includes(`_${scopeStr}_`)) {
-          try {
-            await FileSystem.deleteAsync(DIR + f, { idempotent: true });
-          } catch {}
+          remove = true;
         }
+      }
+
+      if (remove) {
+        try {
+          await FileSystem.deleteAsync(DIR + f, { idempotent: true });
+        } catch {}
       }
     }
   } catch {}

@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { getItem, setItem, deleteItem } from './secureStore';
 import { api, setAccessToken, applySavedBackend, onSessionExpired } from '../api/client';
-import { clearReviewQueueCache } from '../offline/queue';
+import { clearReviewQueueCache, bumpReviewCacheSessionId } from '../offline/queue';
 
 const ACCESS_KEY = 'nn_access';
 
@@ -52,6 +52,7 @@ export function AuthProvider({ children }) {
     // A second 401 (or a failed refresh) means the session is dead — the API
     // layer broadcasts it; drop role so the app routes back to Login.
     const off = onSessionExpired(() => {
+      try { bumpReviewCacheSessionId(); } catch {}
       try { clearReviewQueueCache(); } catch {}
       setRole(null);
       deleteItem(ACCESS_KEY);
@@ -128,6 +129,8 @@ export function AuthProvider({ children }) {
     // otherwise still time out and show "cannot reach the backend" for a backend
     // that is healthy.
     const { data } = await api.post('/auth/login', { employee_id, password, install_id }, { timeout: 60000 });
+    try { bumpReviewCacheSessionId(); } catch {}
+    try { clearReviewQueueCache(null, { legacyOnly: true }); } catch {}
     setAccessToken(data.access_token);
     await setItem('nn_install_id', data.install_id);
     // Native session restore: the refresh cookie never reaches SecureStore
@@ -147,6 +150,7 @@ export function AuthProvider({ children }) {
   const logout = async () => {
     try { await api.post('/auth/logout'); } catch {}
     try { await clearReviewQueueCache(); } catch {}
+    try { bumpReviewCacheSessionId(); } catch {}
     // nn_install_id is DEVICE identity, not session state — keep it so the
     // next login on this phone re-binds the same install record. Only the
     // in-memory token + role are cleared here (refresh cookie is cleared

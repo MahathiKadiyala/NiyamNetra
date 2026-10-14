@@ -16,11 +16,14 @@ import Card from '../../components/Card';
 import EmptyState from '../../components/EmptyState';
 import PrimaryButton from '../../components/PrimaryButton';
 import { fetchReviewQueue, fetchReviewSummary } from '../../api/review';
+import { getAccessToken } from '../../api/client';
 import {
   cacheReviewQueue,
   loadCachedReviewQueue,
   cacheReviewSummary,
   loadCachedReviewSummary,
+  getReviewCacheSessionId,
+  normalizeUserScope,
 } from '../../offline/queue';
 
 const STATUS_FILTERS = [
@@ -63,6 +66,10 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
     setLoadError(null);
 
     const filterKey = facetFilter !== 'ALL' ? facetFilter : 'ALL';
+
+    // Capture active authenticated scope and session generation at request start
+    const requestScope = normalizeUserScope(getAccessToken());
+    const requestSessionId = getReviewCacheSessionId();
 
     try {
       const queueParams = {
@@ -112,14 +119,20 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       setIsOffline(false);
       setLoadError(null);
 
+      // Persist to cache, binding write to the session scope and generation of the initiating request
+      const sessionBinding = {
+        scope: requestScope,
+        sessionId: requestSessionId,
+      };
+
       await Promise.all([
         cacheReviewQueue({
           items: uniqueScans,
           total: matchingCount,
           offset,
           limit: PAGE_SIZE,
-        }, queueParams),
-        cacheReviewSummary(summaryData, queueParams),
+        }, queueParams, sessionBinding),
+        cacheReviewSummary(summaryData, queueParams, sessionBinding),
       ]);
     } catch (err) {
       if (requestId !== activeRequestIdRef.current) {
@@ -146,8 +159,8 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       // NEVER fall back to cache on validation (422) or auth (401/403) errors.
       if (errorType === 'network') {
         const [cachedData, cachedSummary] = await Promise.all([
-          loadCachedReviewQueue(queueParams),
-          loadCachedReviewSummary(queueParams),
+          loadCachedReviewQueue(queueParams, requestScope),
+          loadCachedReviewSummary(queueParams, requestScope),
         ]);
 
         const cachedItems = Array.isArray(cachedData) ? cachedData : cachedData?.items;

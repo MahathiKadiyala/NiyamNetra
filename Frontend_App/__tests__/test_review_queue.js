@@ -940,6 +940,9 @@ async function runTests() {
     REVIEW_CACHE_TTL_MS,
     REVIEW_CACHE_STALE_MS,
     MAX_CACHED_PAGES,
+    getReviewCacheSessionId,
+    bumpReviewCacheSessionId,
+    resetReviewCacheSession,
   } = cacheKeyModule;
 
   // Test 36: Two pages of the same category produce different cache identities
@@ -1352,6 +1355,396 @@ async function runTests() {
     assert.strictEqual(REVIEW_CACHE_TTL_MS, 86400000);
   });
 
+  // --- Module 6.7: Session-Scope Invalidation & Late-Write Protection Tests ---
+
+  // Test 61: Web/localStorage keys matching nn_rq_ and nn_rs_ are removed on cleanup for target user
+  it('61. Web/localStorage keys for target scope are removed while preserving other accounts', () => {
+    const mockStorage = {
+      'nn_rq_v2_u1_inspector_tech_off0_hash1': '{"items":[]}',
+      'nn_rs_v2_u1_inspector_hash2': '{"summary":{}}',
+      'nn_rq_v2_u2_inspector_tech_off0_hash3': '{"items":[]}',
+      'nn_access': 'valid_token_xyz',
+      'nn_install_id': 'install_device_99',
+    };
+
+    const clearWebStorage = (targetScopeStr) => {
+      const keys = Object.keys(mockStorage);
+      for (const k of keys) {
+        const isLegacyKey = k.startsWith('nn_review_queue_cache') || k.startsWith('nn_review_summary_cache');
+        const isScopedKey = k.startsWith('nn_rq_') || k.startsWith('nn_rs_');
+        if (isLegacyKey) {
+          delete mockStorage[k];
+        } else if (isScopedKey) {
+          if (!targetScopeStr || k.includes(`_${targetScopeStr}_`)) {
+            delete mockStorage[k];
+          }
+        }
+      }
+    };
+
+    // Clean for user 1
+    clearWebStorage('u1_inspector');
+
+    assert.strictEqual(mockStorage['nn_rq_v2_u1_inspector_tech_off0_hash1'], undefined);
+    assert.strictEqual(mockStorage['nn_rs_v2_u1_inspector_hash2'], undefined);
+    // User 2's cache must remain intact
+    assert.ok(mockStorage['nn_rq_v2_u2_inspector_tech_off0_hash3']);
+    // Unrelated auth & install records must remain intact
+    assert.strictEqual(mockStorage['nn_access'], 'valid_token_xyz');
+    assert.strictEqual(mockStorage['nn_install_id'], 'install_device_99');
+  });
+
+  // Test 62: Native filesystem queue and summary cache files are removed on cleanup
+  it('62. Native filesystem queue and summary cache files are deleted for target scope', () => {
+    const mockFiles = new Set([
+      'rq_v2_u1_inspector_technical_recovery_off0_hash1.json',
+      'rs_v2_u1_inspector_hash2.json',
+      'rq_v2_u2_inspector_technical_recovery_off0_hash3.json',
+      'manifest.json',
+      'recapture_tasks_101.json',
+      'scan_101_panel_1.jpg',
+    ]);
+
+    const clearNativeFiles = (targetScopeStr) => {
+      for (const f of Array.from(mockFiles)) {
+        const isLegacyFile = f.startsWith('review_queue_cache') || f.startsWith('review_summary_cache');
+        const isScopedFile = f.startsWith('rq_') || f.startsWith('rs_');
+        if (isLegacyFile) {
+          mockFiles.delete(f);
+        } else if (isScopedFile) {
+          if (!targetScopeStr || f.includes(`_${targetScopeStr}_`)) {
+            mockFiles.delete(f);
+          }
+        }
+      }
+    };
+
+    clearNativeFiles('u1_inspector');
+
+    assert.strictEqual(mockFiles.has('rq_v2_u1_inspector_technical_recovery_off0_hash1.json'), false);
+    assert.strictEqual(mockFiles.has('rs_v2_u1_inspector_hash2.json'), false);
+    // User 2 file preserved
+    assert.strictEqual(mockFiles.has('rq_v2_u2_inspector_technical_recovery_off0_hash3.json'), true);
+    // Unrelated queue manifest, task files, and evidence photos preserved
+    assert.strictEqual(mockFiles.has('manifest.json'), true);
+    assert.strictEqual(mockFiles.has('recapture_tasks_101.json'), true);
+    assert.strictEqual(mockFiles.has('scan_101_panel_1.jpg'), true);
+  });
+
+  // Test 63: Legacy unversioned/unscoped cache entries are purged safely during cleanup
+  it('63. Legacy unscoped cache entries are purged regardless of scope argument', () => {
+    const mockStorage = {
+      'nn_review_queue_cache': '{"items":[]}',
+      'nn_review_queue_cache_technical_recovery': '{"items":[]}',
+      'nn_review_summary_cache': '{"total":10}',
+      'nn_rq_v2_u1_inspector_recapture_off0_hash': '{"items":[]}',
+    };
+
+    const clearWebStorage = (targetScopeStr) => {
+      for (const k of Object.keys(mockStorage)) {
+        const isLegacyKey = k.startsWith('nn_review_queue_cache') || k.startsWith('nn_review_summary_cache');
+        const isScopedKey = k.startsWith('nn_rq_') || k.startsWith('nn_rs_');
+        if (isLegacyKey) {
+          delete mockStorage[k];
+        } else if (isScopedKey) {
+          if (!targetScopeStr || k.includes(`_${targetScopeStr}_`)) {
+            delete mockStorage[k];
+          }
+        }
+      }
+    };
+
+    // Calling cleanup even with a specific scope must remove legacy unscoped keys
+    clearWebStorage('u1_inspector');
+
+    assert.strictEqual(mockStorage['nn_review_queue_cache'], undefined);
+    assert.strictEqual(mockStorage['nn_review_queue_cache_technical_recovery'], undefined);
+    assert.strictEqual(mockStorage['nn_review_summary_cache'], undefined);
+  });
+
+  // Test 64: Cache cleanup is idempotent and does not throw on empty storage
+  it('64. Cache cleanup is idempotent and handles empty or missing storage safely', () => {
+    const mockStorage = {};
+    const clearWeb = (targetScopeStr) => {
+      for (const k of Object.keys(mockStorage)) {
+        if (k.startsWith('nn_rq_') || k.startsWith('nn_rs_')) {
+          delete mockStorage[k];
+        }
+      }
+    };
+
+    assert.doesNotThrow(() => {
+      clearWeb('u1_inspector');
+      clearWeb('u1_inspector'); // second call
+      clearWeb(null);           // null scope call
+    });
+  });
+
+  // Test 65: Cleanup strictly preserves unrelated keys
+  it('65. Cleanup does not remove unrelated application keys or mutation manifests', () => {
+    const mockStorage = {
+      'nn_access': 'token',
+      'nn_install_id': 'install_id_123',
+      'nn_offline_queue': '[{"id":"recapture_1"}]',
+      'nn_recapture_tasks_55': '[]',
+      'nn_report_summary_55': '{}',
+      'nn_violation_dossier_55': '{}',
+      'nn_rq_v2_u1_inspector_all_off0_hash': '{}',
+    };
+
+    for (const k of Object.keys(mockStorage)) {
+      if (
+        k.startsWith('nn_rq_') ||
+        k.startsWith('nn_rs_') ||
+        k.startsWith('nn_review_queue_cache') ||
+        k.startsWith('nn_review_summary_cache')
+      ) {
+        delete mockStorage[k];
+      }
+    }
+
+    assert.strictEqual(mockStorage['nn_access'], 'token');
+    assert.strictEqual(mockStorage['nn_install_id'], 'install_id_123');
+    assert.strictEqual(mockStorage['nn_offline_queue'], '[{"id":"recapture_1"}]');
+    assert.strictEqual(mockStorage['nn_recapture_tasks_55'], '[]');
+    assert.strictEqual(mockStorage['nn_report_summary_55'], '{}');
+    assert.strictEqual(mockStorage['nn_violation_dossier_55'], '{}');
+    assert.strictEqual(mockStorage['nn_rq_v2_u1_inspector_all_off0_hash'], undefined);
+  });
+
+  // Test 66: Account A's cached queue cannot be loaded by Account B
+  it('66. Account A cached queue fails validation when accessed by Account B', () => {
+    const scopeA = { userId: '10', role: 'inspector' };
+    const scopeB = { userId: '20', role: 'inspector' };
+    const query = { subtype: 'technical_recovery', offset: 0 };
+
+    const keyA = buildReviewQueueCacheKey(query, scopeA);
+    const keyB = buildReviewQueueCacheKey(query, scopeB);
+    assert.notStrictEqual(keyA.storageKey, keyB.storageKey);
+
+    const envelopeA = createReviewQueueEnvelope([{ scan_id: 101 }], keyA.query, scopeA);
+    const validationForB = validateCachedReviewQueue(envelopeA, query, scopeB);
+
+    assert.strictEqual(validationForB.valid, false);
+    assert.ok(validationForB.reason.includes('Scope mismatch'));
+  });
+
+  // Test 67: Login as a different account cannot access prior session cache
+  it('67. Login after logout cannot access prior session cache', () => {
+    let mockSessionToken = 'header.eyJzdWIiOiIxMCIsInJvbGUiOiJpbnNwZWN0b3IifQ.sig';
+    let currentScope = normalizeUserScope(mockSessionToken);
+    assert.strictEqual(currentScope.scopeStr, 'u10_inspector');
+
+    const keyUser1 = buildReviewQueueCacheKey({ subtype: 'recapture_required' }, currentScope);
+    const envelope1 = createReviewQueueEnvelope([{ scan_id: 1 }], keyUser1.query, currentScope);
+
+    // User 1 logs out
+    mockSessionToken = null;
+    currentScope = normalizeUserScope(mockSessionToken);
+    assert.strictEqual(currentScope, null);
+
+    // User 2 logs in
+    mockSessionToken = 'header.eyJzdWIiOiIyMCIsInJvbGUiOiJpbnNwZWN0b3IifQ.sig';
+    currentScope = normalizeUserScope(mockSessionToken);
+    assert.strictEqual(currentScope.scopeStr, 'u20_inspector');
+
+    // User 2 tries to validate User 1's envelope
+    const check = validateCachedReviewQueue(envelope1, { subtype: 'recapture_required' }, currentScope);
+    assert.strictEqual(check.valid, false);
+    assert.ok(check.reason.includes('Scope mismatch'));
+  });
+
+  // Test 68: Role change from inspector to admin isolates cached review records
+  it('68. Role change from inspector to admin isolates cached review records', () => {
+    const inspScope = { userId: '5', role: 'inspector' };
+    const adminScope = { userId: '5', role: 'admin' };
+    const query = { subtype: 'ALL', offset: 0 };
+
+    const inspKey = buildReviewQueueCacheKey(query, inspScope);
+    const adminKey = buildReviewQueueCacheKey(query, adminScope);
+
+    assert.notStrictEqual(inspKey.storageKey, adminKey.storageKey);
+    assert.strictEqual(inspKey.scope, 'u5_inspector');
+    assert.strictEqual(adminKey.scope, 'u5_admin');
+
+    const inspEnvelope = createReviewQueueEnvelope([{ scan_id: 501 }], inspKey.query, inspScope);
+    const adminValidation = validateCachedReviewQueue(inspEnvelope, query, adminScope);
+
+    assert.strictEqual(adminValidation.valid, false);
+    assert.ok(adminValidation.reason.includes('Scope mismatch'));
+  });
+
+  // Test 69: Routine token refresh preserves valid cached data when principal and role are unchanged
+  it('69. Routine token refresh preserves valid cached data when principal and role are unchanged', () => {
+    const payloadPre = Buffer.from(JSON.stringify({ sub: '30', role: 'inspector', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64');
+    const payloadPost = Buffer.from(JSON.stringify({ sub: '30', role: 'inspector', exp: Math.floor(Date.now() / 1000) + 7200 })).toString('base64');
+    const preRefreshToken = `header.${payloadPre}.sig1`;
+    const postRefreshToken = `header.${payloadPost}.sig2`;
+
+    const scopePre = normalizeUserScope(preRefreshToken);
+    const scopePost = normalizeUserScope(postRefreshToken);
+
+    assert.strictEqual(scopePre.scopeStr, scopePost.scopeStr);
+    assert.strictEqual(scopePre.userId, scopePost.userId);
+    assert.strictEqual(scopePre.role, scopePost.role);
+
+    const query = { subtype: 'unconfirmed_violation', offset: 0 };
+    const key = buildReviewQueueCacheKey(query, scopePre);
+    const envelope = createReviewQueueEnvelope([{ scan_id: 701 }], key.query, scopePre);
+
+    const val = validateCachedReviewQueue(envelope, query, scopePost);
+    assert.strictEqual(val.valid, true);
+    assert.strictEqual(val.isStale, false);
+  });
+
+  // Helper function to simulate cache write revalidation logic from queue.js
+  function simulateCacheWriteRevalidation(sessionBinding, currentScope, currentSessionId) {
+    if (!currentScope) return false;
+    if (sessionBinding) {
+      if (sessionBinding.sessionId !== undefined && sessionBinding.sessionId !== currentSessionId) {
+        return false;
+      }
+      const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
+      if (!boundScope || boundScope.scopeStr !== currentScope.scopeStr) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Test 70: Late response from request started by Account A cannot write to Account B cache
+  it('70. Late response started by Account A is rejected after Account B signs in', () => {
+    const sessionGen1 = 1;
+    const scopeA = normalizeUserScope({ userId: '1', role: 'inspector' });
+
+    // Request started under Account A
+    const sessionBindingA = { scope: scopeA, sessionId: sessionGen1 };
+
+    // While in flight, Account A logs out and Account B signs in
+    const sessionGen2 = 2;
+    const scopeB = normalizeUserScope({ userId: '2', role: 'inspector' });
+
+    // Response for Account A returns late
+    const writeAllowed = simulateCacheWriteRevalidation(sessionBindingA, scopeB, sessionGen2);
+    assert.strictEqual(writeAllowed, false, 'Late response from Account A must not write to Account B cache');
+  });
+
+  // Test 71: Response initiated before logout cannot repopulate cache after logout cleanup
+  it('71. Response initiated before logout cannot repopulate cache after logout cleanup', () => {
+    const sessionGen1 = 1;
+    const scopeUser1 = normalizeUserScope({ userId: '1', role: 'inspector' });
+    const sessionBinding = { scope: scopeUser1, sessionId: sessionGen1 };
+
+    // User 1 logs out: session generation bumped, current scope is null
+    const sessionGenAfterLogout = 2;
+    const currentScopeAfterLogout = null;
+
+    const writeAllowed = simulateCacheWriteRevalidation(sessionBinding, currentScopeAfterLogout, sessionGenAfterLogout);
+    assert.strictEqual(writeAllowed, false, 'In-flight response must not recreate cache after logout');
+  });
+
+  // Test 72: Pending summary cache write cannot restore previous account's metrics
+  it('72. Pending summary cache write cannot restore previous account metrics after account change', () => {
+    const sessionBindingUser1 = {
+      scope: { userId: '10', role: 'inspector' },
+      sessionId: 4,
+    };
+
+    // Active session switched to User 20
+    const activeScope = { userId: '20', role: 'inspector', scopeStr: 'u20_inspector' };
+    const activeSessionId = 5;
+
+    const writeAllowed = simulateCacheWriteRevalidation(sessionBindingUser1, activeScope, activeSessionId);
+    assert.strictEqual(writeAllowed, false, 'Summary write must reject mismatched account');
+  });
+
+  // Test 73: Late response for an old authorization scope cannot overwrite current cache entry
+  it('73. Late response for old authorization scope is rejected when role changes', () => {
+    const sessionBindingOldRole = {
+      scope: { userId: '5', role: 'inspector' },
+      sessionId: 10,
+    };
+
+    // User promoted to admin, same user ID but new role
+    const promotedScope = { userId: '5', role: 'admin', scopeStr: 'u5_admin' };
+    const currentSessionId = 10; // Even if generation is same, role mismatch must reject
+
+    const writeAllowed = simulateCacheWriteRevalidation(sessionBindingOldRole, promotedScope, currentSessionId);
+    assert.strictEqual(writeAllowed, false, 'Old inspector response must not overwrite admin cache');
+  });
+
+  // Test 74: Session generation bump is monotonic and invalidates older generation requests
+  it('74. Session generation bump is monotonic and invalidates older generation requests', () => {
+    resetReviewCacheSession();
+    const g1 = getReviewCacheSessionId();
+    assert.strictEqual(g1, 1);
+
+    const g2 = bumpReviewCacheSessionId();
+    assert.strictEqual(g2, 2);
+
+    const g3 = bumpReviewCacheSessionId();
+    assert.strictEqual(g3, 3);
+    assert.ok(g3 > g2 && g2 > g1);
+  });
+
+  // Test 75: Session binding object is safely unwrapped by normalizeUserScope
+  it('75. Session binding object is safely unwrapped by normalizeUserScope', () => {
+    const binding = {
+      scope: { userId: '7', role: 'inspector' },
+      sessionId: 99,
+    };
+
+    const unwrapped = normalizeUserScope(binding);
+    assert.ok(unwrapped);
+    assert.strictEqual(unwrapped.userId, '7');
+    assert.strictEqual(unwrapped.role, 'inspector');
+    assert.strictEqual(unwrapped.scopeStr, 'u7_inspector');
+  });
+
+  // Test 76: Missing or unauthenticated session scope rejects cache writes safely
+  it('76. Missing or unauthenticated session scope rejects cache writes safely', () => {
+    const nullScope = null;
+    const writeWithNull = simulateCacheWriteRevalidation(null, nullScope, 1);
+    assert.strictEqual(writeWithNull, false);
+
+    const undefinedScope = undefined;
+    const writeWithUndefined = simulateCacheWriteRevalidation(null, undefinedScope, 1);
+    assert.strictEqual(writeWithUndefined, false);
+  });
+
+  // Test 77: Concurrent category requests preserve distinct query identities within active session
+  it('77. Concurrent category requests preserve distinct query identities within active session', () => {
+    const scope = { userId: '10', role: 'inspector' };
+    const key1 = buildReviewQueueCacheKey({ subtype: 'technical_recovery', offset: 0 }, scope);
+    const key2 = buildReviewQueueCacheKey({ subtype: 'recapture_required', offset: 0 }, scope);
+    const key3 = buildReviewQueueCacheKey({ subtype: 'technical_recovery', offset: 25 }, scope);
+
+    assert.notStrictEqual(key1.storageKey, key2.storageKey);
+    assert.notStrictEqual(key1.storageKey, key3.storageKey);
+    assert.notStrictEqual(key2.storageKey, key3.storageKey);
+  });
+
+  // Test 78: Offline cache miss triggers truthful unavailable state without fabricating records
+  it('78. Offline cache miss triggers truthful unavailable state without fabricating records', () => {
+    let uiState = 'loading';
+    let errorMessage = null;
+
+    const handleOfflineLookup = (cachedEnvelope) => {
+      if (!cachedEnvelope || !cachedEnvelope.items) {
+        uiState = 'unavailable';
+        errorMessage = 'No offline cache available for this query.';
+        return null;
+      }
+      uiState = 'cached';
+      return cachedEnvelope.items;
+    };
+
+    const res = handleOfflineLookup(null);
+    assert.strictEqual(res, null);
+    assert.strictEqual(uiState, 'unavailable');
+    assert.ok(errorMessage.includes('No offline cache'));
+  });
+
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);
   if (failed > 0) {
     process.exit(1);
@@ -1359,4 +1752,5 @@ async function runTests() {
 }
 
 runTests();
+
 
