@@ -6,6 +6,8 @@ import { api } from './client';
  * @param {Object} params
  * @param {string} [params.status_filter] - OPEN | IN_REVIEW | RESOLVED | ALL
  * @param {string} [params.reason] - not_assessed | low_confidence | offline_edit | conflict | violation | ALL
+ * @param {string} [params.subtype] - technical_recovery | recapture_required | unconfirmed_violation | confirmed_violation | low_confidence | offline_edit | ALL
+ * @param {string} [params.subtype_filter] - Alias for subtype parameter
  * @param {string} [params.priority] - high | medium | low
  * @param {string} [params.area] - City or district filter
  * @param {string} [params.date_from] - YYYY-MM-DD
@@ -21,6 +23,10 @@ export async function fetchReviewQueue(params = {}) {
   if (params.reason && params.reason !== 'ALL') {
     query.reason = params.reason;
   }
+  const subtype = params.subtype || params.subtype_filter;
+  if (subtype && subtype !== 'ALL') {
+    query.subtype = subtype;
+  }
   if (params.priority && params.priority !== 'ALL') {
     query.priority = params.priority;
   }
@@ -29,8 +35,8 @@ export async function fetchReviewQueue(params = {}) {
   }
   if (params.date_from) query.date_from = params.date_from;
   if (params.date_to) query.date_to = params.date_to;
-  if (params.limit) query.limit = params.limit;
-  if (params.offset) query.offset = params.offset;
+  if (params.limit !== undefined && params.limit !== null) query.limit = params.limit;
+  if (params.offset !== undefined && params.offset !== null) query.offset = params.offset;
 
   const { data } = await api.get('/review/queue', { params: query });
   return data;

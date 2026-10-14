@@ -390,32 +390,39 @@ export async function enqueueConflictResolution({
 
 const REVIEW_CACHE_KEY = 'nn_review_queue_cache';
 
-export async function cacheReviewQueue(items) {
+export async function cacheReviewQueue(items, filterKey = 'ALL') {
   try {
+    const suffix = filterKey && filterKey !== 'ALL' ? `_${filterKey}` : '';
+    const key = `${REVIEW_CACHE_KEY}${suffix}`;
     if (isWeb) {
-      globalThis.localStorage?.setItem(REVIEW_CACHE_KEY, JSON.stringify(items || []));
+      globalThis.localStorage?.setItem(key, JSON.stringify(items || []));
       return;
     }
     await ensureDir();
-    const cachePath = pendingDir() + 'review_queue_cache.json';
+    const cachePath = pendingDir() + `review_queue_cache${suffix}.json`;
     await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(items || []));
   } catch {}
 }
 
-export async function loadCachedReviewQueue() {
+export async function loadCachedReviewQueue(filterKey = 'ALL') {
   try {
+    const suffix = filterKey && filterKey !== 'ALL' ? `_${filterKey}` : '';
+    const key = `${REVIEW_CACHE_KEY}${suffix}`;
     if (isWeb) {
-      const raw = globalThis.localStorage?.getItem(REVIEW_CACHE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      const raw = globalThis.localStorage?.getItem(key);
+      if (!raw) return filterKey && filterKey !== 'ALL' ? null : [];
+      return JSON.parse(raw);
     }
     await ensureDir();
-    const cachePath = pendingDir() + 'review_queue_cache.json';
+    const cachePath = pendingDir() + `review_queue_cache${suffix}.json`;
     const info = await FileSystem.getInfoAsync(cachePath);
-    if (!info.exists) return [];
+    if (!info.exists) {
+      return filterKey && filterKey !== 'ALL' ? null : [];
+    }
     const raw = await FileSystem.readAsStringAsync(cachePath);
     return JSON.parse(raw);
   } catch {
-    return [];
+    return filterKey && filterKey !== 'ALL' ? null : [];
   }
 }
 

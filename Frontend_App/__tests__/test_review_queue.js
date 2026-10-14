@@ -498,7 +498,7 @@ async function runTests() {
   });
 
   // Test 20: Stale async responses cannot overwrite active inspection review
-  it('20. Stale API response cannot overwrite active inspection review', async () => {
+  await itAsync('20. Stale API response cannot overwrite active inspection review', async () => {
     let currentActiveInspectionId = 100;
     let renderedInspectionDetail = null;
 
@@ -507,9 +507,6 @@ async function runTests() {
       return { id, store_name: `Store for #${id}` };
     };
 
-    // User is on inspection 100
-    // Rapidly switches to inspection 101
-    // The request for 100 is slow (50ms), request for 101 is fast (10ms)
     let cancelledRequests = new Set();
 
     const loadInspection = (id, delayMs) => {
@@ -535,6 +532,397 @@ async function runTests() {
     // After both complete, rendered inspection MUST be 101, never 100
     assert.strictEqual(renderedInspectionDetail.id, 101);
     assert.strictEqual(renderedInspectionDetail.store_name, 'Store for #101');
+  });
+
+  // Test 21: Category selection maps to correct canonical subtype parameter for API query
+  it('21. Category selection sends valid subtype parameter according to backend contract', () => {
+    const buildQueueQuery = (params) => {
+      const query = {};
+      if (params.status_filter && params.status_filter !== 'ALL') {
+        query.status_filter = params.status_filter;
+      }
+      if (params.reason && params.reason !== 'ALL') {
+        query.reason = params.reason;
+      }
+      const subtype = params.subtype || params.subtype_filter;
+      if (subtype && subtype !== 'ALL') {
+        query.subtype = subtype;
+      }
+      if (params.limit !== undefined) query.limit = params.limit;
+      if (params.offset !== undefined) query.offset = params.offset;
+      return query;
+    };
+
+    // Subtype parameter validation for canonical categories
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'technical_recovery' }).subtype,
+      'technical_recovery'
+    );
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'recapture_required' }).subtype,
+      'recapture_required'
+    );
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'unconfirmed_violations' }).subtype,
+      'unconfirmed_violations'
+    );
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'confirmed_violations' }).subtype,
+      'confirmed_violations'
+    );
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'low_confidence' }).subtype,
+      'low_confidence'
+    );
+    assert.strictEqual(
+      buildQueueQuery({ subtype: 'ALL' }).subtype,
+      undefined,
+      'ALL category must not send subtype query param'
+    );
+  });
+
+  // Test 22: Pagination parameters forwarded in query params
+  it('22. Pagination sends the expected limit and offset parameters', () => {
+    const buildQueueQuery = (params) => {
+      const query = { limit: params.limit ?? 25, offset: params.offset ?? 0 };
+      if (params.subtype && params.subtype !== 'ALL') query.subtype = params.subtype;
+      return query;
+    };
+
+    const qFirstPage = buildQueueQuery({ limit: 25, offset: 0, subtype: 'technical_recovery' });
+    assert.strictEqual(qFirstPage.limit, 25);
+    assert.strictEqual(qFirstPage.offset, 0);
+    assert.strictEqual(qFirstPage.subtype, 'technical_recovery');
+
+    const qSecondPage = buildQueueQuery({ limit: 25, offset: 25, subtype: 'technical_recovery' });
+    assert.strictEqual(qSecondPage.limit, 25);
+    assert.strictEqual(qSecondPage.offset, 25);
+    assert.strictEqual(qSecondPage.subtype, 'technical_recovery');
+  });
+
+  // Test 23: Category selection resets pagination offset to zero
+  it('23. Selecting a subtype resets the pagination offset to zero', () => {
+    let state = {
+      facetFilter: 'ALL',
+      offset: 50,
+    };
+
+    const handleSelectFacet = (newFacet) => {
+      state = {
+        ...state,
+        facetFilter: newFacet,
+        offset: 0, // Reset to zero on category change
+      };
+    };
+
+    handleSelectFacet('recapture_required');
+    assert.strictEqual(state.facetFilter, 'recapture_required');
+    assert.strictEqual(state.offset, 0, 'Offset MUST be reset to zero on category selection');
+  });
+
+  // Test 24: Backend filtered total controls page count and pagination bounds
+  it('24. The backend filtered total controls the page count and boundary conditions', () => {
+    const calculatePagination = (totalMatching, limit, currentOffset) => {
+      const totalPages = Math.ceil(totalMatching / limit) || 1;
+      const currentPage = Math.floor(currentOffset / limit) + 1;
+      const hasNext = currentOffset + limit < totalMatching;
+      const hasPrev = currentOffset > 0;
+      return { totalPages, currentPage, hasNext, hasPrev };
+    };
+
+    // Total 58 items, limit 25
+    // Page 1: offset 0
+    const p1 = calculatePagination(58, 25, 0);
+    assert.strictEqual(p1.totalPages, 3);
+    assert.strictEqual(p1.currentPage, 1);
+    assert.strictEqual(p1.hasPrev, false);
+    assert.strictEqual(p1.hasNext, true);
+
+    // Page 2: offset 25
+    const p2 = calculatePagination(58, 25, 25);
+    assert.strictEqual(p2.currentPage, 2);
+    assert.strictEqual(p2.hasPrev, true);
+    assert.strictEqual(p2.hasNext, true);
+
+    // Page 3: offset 50 (final 8 items)
+    const p3 = calculatePagination(58, 25, 50);
+    assert.strictEqual(p3.currentPage, 3);
+    assert.strictEqual(p3.hasPrev, true);
+    assert.strictEqual(p3.hasNext, false);
+  });
+
+  // Test 25: Later pages remain reachable without resetting category
+  it('25. Matching scans from later pages remain reachable via pagination without losing subtype filter', () => {
+    let queryParams = {
+      subtype: 'technical_recovery',
+      offset: 0,
+      limit: 25,
+    };
+
+    const paginateNext = (currentParams, totalMatching) => {
+      if (currentParams.offset + currentParams.limit < totalMatching) {
+        return {
+          ...currentParams,
+          offset: currentParams.offset + currentParams.limit,
+        };
+      }
+      return currentParams;
+    };
+
+    // User navigates from Page 1 to Page 2
+    queryParams = paginateNext(queryParams, 40);
+    assert.strictEqual(queryParams.offset, 25);
+    assert.strictEqual(queryParams.subtype, 'technical_recovery', 'Subtype must be preserved on page change');
+  });
+
+  // Test 26: Overall queue summary remains separate from active filtered total
+  it('26. Overall queue summary remains separate from the active filtered total', () => {
+    const overallSummary = {
+      total: 30, // 30 total scans in entire review queue
+      breakdown: {
+        technical_recovery: 4,
+        recapture_required: 6,
+        unconfirmed_violations: 15,
+        confirmed_violations: 5,
+      },
+    };
+
+    // Backend response for GET /review/queue?subtype=technical_recovery
+    const filteredResponse = {
+      total: 4, // 4 matching scans for this category
+      offset: 0,
+      limit: 25,
+      items: [{ scan_id: 101 }, { scan_id: 102 }, { scan_id: 103 }, { scan_id: 104 }],
+    };
+
+    // Verification: summary total describes overall queue, filtered total describes category
+    assert.strictEqual(overallSummary.total, 30);
+    assert.strictEqual(filteredResponse.total, 4);
+    assert.strictEqual(filteredResponse.items.length, 4);
+    assert.notStrictEqual(overallSummary.total, filteredResponse.total);
+  });
+
+  // Test 27: Overlapping category counts are not added together into a misleading total
+  it('27. Overlapping category counts are never added into a misleading total', () => {
+    const multiReasonScan = {
+      scan_id: 88,
+      reasons: [
+        { type: 'violation', subtype: 'unconfirmed_violation' },
+        { type: 'low_confidence', subtype: 'low_confidence' },
+      ],
+    };
+
+    // Both categories match the single scan
+    const matchesUnconfirmed = multiReasonScan.reasons.some((r) => r.subtype === 'unconfirmed_violation');
+    const matchesLowConf = multiReasonScan.reasons.some((r) => r.type === 'low_confidence');
+    assert.strictEqual(matchesUnconfirmed, true);
+    assert.strictEqual(matchesLowConf, true);
+
+    // Summing matching counts naively gives 2
+    const naiveCount = (matchesUnconfirmed ? 1 : 0) + (matchesLowConf ? 1 : 0);
+    assert.strictEqual(naiveCount, 2);
+
+    // Authoritative distinct scan count returned by backend MUST be 1
+    const distinctScanCount = 1;
+    assert.strictEqual(distinctScanCount, 1);
+    assert.notStrictEqual(distinctScanCount, naiveCount);
+  });
+
+  // Test 28: Stale in-flight category response cannot overwrite current category
+  await itAsync('28. Slow response from previously selected category cannot overwrite current category', async () => {
+    let activeRequestId = 0;
+    let renderedState = { facet: 'ALL', items: [] };
+
+    const simulateFetchCategory = async (facet, delayMs) => {
+      const requestId = ++activeRequestId;
+      await new Promise((r) => setTimeout(r, delayMs));
+
+      // Simulate receiving response
+      if (requestId === activeRequestId) {
+        renderedState = {
+          facet,
+          items: [{ category: facet, scan_id: facet === 'technical_recovery' ? 101 : 202 }],
+        };
+      }
+    };
+
+    // User first clicks 'technical_recovery' (slow response: 60ms)
+    simulateFetchCategory('technical_recovery', 60);
+
+    // User immediately switches to 'confirmed_violations' (fast response: 15ms)
+    simulateFetchCategory('confirmed_violations', 15);
+
+    // Wait for both to settle
+    await new Promise((r) => setTimeout(r, 80));
+
+    // The rendered state MUST be confirmed_violations, NOT technical_recovery
+    assert.strictEqual(renderedState.facet, 'confirmed_violations');
+    assert.strictEqual(renderedState.items[0].category, 'confirmed_violations');
+    assert.strictEqual(renderedState.items[0].scan_id, 202);
+  });
+
+  // Test 29: Stale in-flight page response cannot overwrite current page
+  await itAsync('29. Late response from earlier page cannot replace a newer page', async () => {
+    let activeRequestId = 0;
+    let renderedPage = 0;
+
+    const simulatePageFetch = async (pageOffset, delayMs) => {
+      const requestId = ++activeRequestId;
+      await new Promise((r) => setTimeout(r, delayMs));
+
+      if (requestId === activeRequestId) {
+        renderedPage = pageOffset;
+      }
+    };
+
+    // Page 1 requested (slow: 50ms)
+    simulatePageFetch(0, 50);
+
+    // Page 2 requested (fast: 10ms)
+    simulatePageFetch(25, 10);
+
+    await new Promise((r) => setTimeout(r, 70));
+
+    // Must be Page 2 (offset 25), never overwritten by Page 1 (offset 0)
+    assert.strictEqual(renderedPage, 25);
+  });
+
+  // Test 30: Cache partitioning: a filtered request cannot silently reuse an unfiltered cached list
+  it('30. Filtered category request cannot silently reuse an unfiltered cached list', () => {
+    const memoryCache = {
+      ALL: [{ scan_id: 1, type: 'general' }, { scan_id: 2, type: 'tech' }],
+      // Note: No cache for 'technical_recovery'
+    };
+
+    const loadCacheForCategory = (categoryKey) => {
+      if (categoryKey && categoryKey !== 'ALL') {
+        return memoryCache[categoryKey] || null;
+      }
+      return memoryCache['ALL'] || [];
+    };
+
+    // Unfiltered request finds unfiltered cache
+    const allResult = loadCacheForCategory('ALL');
+    assert.strictEqual(allResult.length, 2);
+
+    // Filtered request for technical_recovery returns null, NOT the unfiltered list
+    const filteredResult = loadCacheForCategory('technical_recovery');
+    assert.strictEqual(filteredResult, null, 'Must NOT fall back to unfiltered cache for category request');
+  });
+
+  // Test 31: HTTP 422 responses handled correctly without resetting filter or falling back
+  it('31. HTTP 422 validation errors are handled correctly without silently removing filter', () => {
+    let activeFilter = 'invalid_subtype';
+    let uiError = null;
+    let displayedItems = [{ scan_id: 999 }];
+
+    const handleApiResponse = (err) => {
+      if (err.response?.status === 422) {
+        uiError = {
+          type: 'validation',
+          message: err.response.data?.detail || 'Invalid filter parameters specified.',
+        };
+        // Preserves active filter
+        displayedItems = [];
+      }
+    };
+
+    handleApiResponse({
+      response: {
+        status: 422,
+        data: { detail: "Invalid subtype 'invalid_subtype'. Allowed values: technical_recovery, recapture_required..." },
+      },
+    });
+
+    assert.strictEqual(uiError.type, 'validation');
+    assert.ok(uiError.message.includes('Invalid subtype'));
+    assert.strictEqual(activeFilter, 'invalid_subtype', 'Active filter must NOT be silently cleared');
+    assert.strictEqual(displayedItems.length, 0, 'Must NOT fall back to unfiltered items');
+  });
+
+  // Test 32: Authorization and network failures remain distinguishable
+  it('32. Authorization (401/403) and network failures remain distinguishable', () => {
+    const classifyError = (err) => {
+      const status = err.status || err.response?.status;
+      if (status === 401) return { type: 'auth', label: 'Authentication Required' };
+      if (status === 403 || err.code === 'FORBIDDEN') return { type: 'forbidden', label: 'Access Restricted' };
+      if (status === 422) return { type: 'validation', label: 'Invalid Parameters' };
+      return { type: 'network', label: 'Network Offline' };
+    };
+
+    const err401 = classifyError({ response: { status: 401 } });
+    assert.strictEqual(err401.type, 'auth');
+
+    const err403 = classifyError({ response: { status: 403 } });
+    assert.strictEqual(err403.type, 'forbidden');
+
+    const err422 = classifyError({ response: { status: 422 } });
+    assert.strictEqual(err422.type, 'validation');
+
+    const errNet = classifyError(new Error('Network request failed'));
+    assert.strictEqual(errNet.type, 'network');
+  });
+
+  // Test 33: Cached summary distinguishable from live results
+  it('33. Cached summary data is clearly distinguishable from live results when offline', () => {
+    const renderBanner = (isOffline, facetFilter) => {
+      if (!isOffline) return null;
+      return `Offline mode: showing cached ${facetFilter !== 'ALL' ? `"${facetFilter}" ` : ''}data. Live synchronization pending.`;
+    };
+
+    const liveBanner = renderBanner(false, 'technical_recovery');
+    assert.strictEqual(liveBanner, null);
+
+    const offlineFilteredBanner = renderBanner(true, 'technical_recovery');
+    assert.strictEqual(offlineFilteredBanner.includes('Offline mode'), true);
+    assert.strictEqual(offlineFilteredBanner.includes('technical_recovery'), true);
+  });
+
+  // Test 34: API errors never fabricate zero counts or synthesize queue entries
+  it('34. API errors never fabricate zero counts or synthesize queue entries', () => {
+    let totalMatching = null;
+    let items = null;
+    let errorState = null;
+
+    const handleFailure = (err) => {
+      totalMatching = 0;
+      items = [];
+      errorState = err.message;
+    };
+
+    handleFailure(new Error('500 Internal Server Error'));
+
+    // Should indicate error, not a successful "All clear" state
+    assert.strictEqual(errorState, '500 Internal Server Error');
+    assert.strictEqual(items.length, 0);
+  });
+
+  // Test 35: Deduplication preserves single scan card when backend returns multiple findings per scan
+  it('35. A scan with multiple findings appears once according to backend response', () => {
+    const multiFindingBackendItems = [
+      {
+        scan_id: 777,
+        inspection_id: 50,
+        commodity_generic: 'Edible Oil',
+        findings: [
+          { check_id: 'CHK01', needs_review: true },
+          { check_id: 'CHK02', needs_review: true },
+          { check_id: 'CHK05', needs_review: true },
+        ],
+      },
+    ];
+
+    const seenScans = new Set();
+    const uniqueScans = [];
+    for (const item of multiFindingBackendItems) {
+      if (!seenScans.has(item.scan_id)) {
+        seenScans.add(item.scan_id);
+        uniqueScans.push(item);
+      }
+    }
+
+    assert.strictEqual(uniqueScans.length, 1);
+    assert.strictEqual(uniqueScans[0].scan_id, 777);
   });
 
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);

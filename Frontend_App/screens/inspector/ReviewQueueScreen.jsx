@@ -38,6 +38,8 @@ const REASON_FILTERS = [
   { id: 'offline_edit', label: 'Offline Edits' },
 ];
 
+const PAGE_SIZE = 25;
+
 export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
   const [items, setItems] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -46,26 +48,53 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [reasonFilter, setReasonFilter] = useState('ALL');
   const [facetFilter, setFacetFilter] = useState('ALL'); // 'ALL' | 'unconfirmed_violations' | 'confirmed_violations' | 'technical_recovery' | 'recapture_required' | 'low_confidence'
+  const [offset, setOffset] = useState(0);
+  const [totalMatching, setTotalMatching] = useState(0);
   const [areaSearch, setAreaSearch] = useState('');
   const [isOffline, setIsOffline] = useState(false);
   const [loadError, setLoadError] = useState(null);
 
+  const activeRequestIdRef = React.useRef(0);
+
   const loadData = useCallback(async (isRefresh = false) => {
+    const requestId = ++activeRequestIdRef.current;
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     setLoadError(null);
 
+    const filterKey = facetFilter !== 'ALL' ? facetFilter : 'ALL';
+
     try {
+      const queueParams = {
+        limit: PAGE_SIZE,
+        offset,
+      };
+      if (statusFilter !== 'ALL') {
+        queueParams.status_filter = statusFilter;
+      }
+      if (reasonFilter !== 'ALL') {
+        queueParams.reason = reasonFilter;
+      }
+      if (facetFilter !== 'ALL') {
+        queueParams.subtype = facetFilter;
+      }
+      if (areaSearch && areaSearch.trim()) {
+        queueParams.area = areaSearch.trim();
+      }
+
       const [queueData, summaryData] = await Promise.all([
-        fetchReviewQueue({
-          status_filter: statusFilter,
-          reason: reasonFilter,
-          area: areaSearch,
-        }),
+        fetchReviewQueue(queueParams),
         fetchReviewSummary(),
       ]);
 
+      // Late response from an earlier category or offset request must not overwrite active state
+      if (requestId !== activeRequestIdRef.current) {
+        return;
+      }
+
       const rawItems = Array.isArray(queueData) ? queueData : queueData?.items || [];
+      const matchingCount = typeof queueData?.total === 'number' ? queueData.total : rawItems.length;
+
       // Deduplicate scans by scan_id to ensure stable scan identity
       const seenScans = new Set();
       const uniqueScans = [];
@@ -78,48 +107,97 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       }
 
       setItems(uniqueScans);
+      setTotalMatching(matchingCount);
       setSummary(summaryData);
       setIsOffline(false);
       setLoadError(null);
 
       await Promise.all([
-        cacheReviewQueue(uniqueScans),
+        cacheReviewQueue(uniqueScans, filterKey),
         cacheReviewSummary(summaryData),
       ]);
     } catch (err) {
-      // Offline fallback: load cached review items and cached summary
-      const [cachedItems, cachedSummary] = await Promise.all([
-        loadCachedReviewQueue(),
-        loadCachedReviewSummary(),
-      ]);
-
-      if (cachedItems && cachedItems.length > 0) {
-        let filtered = cachedItems;
-        if (statusFilter !== 'ALL') {
-          filtered = filtered.filter((x) => (x.review_status || x.status) === statusFilter);
-        }
-        if (reasonFilter !== 'ALL') {
-          filtered = filtered.filter((x) => x.reasons?.some((r) => r.type === reasonFilter));
-        }
-        setItems(filtered);
-        setSummary(cachedSummary);
-        setIsOffline(true);
-        setLoadError(null);
-      } else {
-        // Explicit API error state — do NOT silently render empty queue
-        setItems([]);
-        setIsOffline(false);
-        setLoadError(err?.message || 'Unable to retrieve review queue from server.');
+      if (requestId !== activeRequestIdRef.current) {
+        return;
       }
+
+      const status = err?.status || err?.response?.status;
+      let errorType = 'network';
+      let message = err?.message || 'Unable to retrieve review queue from server.';
+
+      if (status === 401) {
+        errorType = 'auth';
+        message = 'Authentication required. Session expired or missing.';
+      } else if (status === 403 || err?.code === 'FORBIDDEN') {
+        errorType = 'forbidden';
+        message = 'Access restricted: officer review queue requires inspector privileges.';
+      } else if (status === 422) {
+        errorType = 'validation';
+        const detail = err?.response?.data?.detail;
+        message = typeof detail === 'string' ? detail : 'Invalid filter parameters specified.';
+      }
+
+      // Offline fallback: load cached review items for this filter and cached summary
+      // NEVER fall back to cache on validation (422) or auth (401/403) errors.
+      if (errorType === 'network') {
+        const [cachedItems, cachedSummary] = await Promise.all([
+          loadCachedReviewQueue(filterKey),
+          loadCachedReviewSummary(),
+        ]);
+
+        if (cachedItems && cachedItems.length > 0) {
+          let filtered = cachedItems;
+          if (statusFilter !== 'ALL') {
+            filtered = filtered.filter((x) => (x.review_status || x.status) === statusFilter);
+          }
+          if (reasonFilter !== 'ALL') {
+            filtered = filtered.filter((x) => x.reasons?.some((r) => r.type === reasonFilter));
+          }
+          setItems(filtered);
+          setTotalMatching(filtered.length);
+          setSummary(cachedSummary);
+          setIsOffline(true);
+          setLoadError(null);
+          return;
+        }
+      }
+
+      // Explicit error state: do NOT show false empty queue or unfiltered cache
+      setItems([]);
+      setTotalMatching(0);
+      setIsOffline(false);
+      setLoadError({
+        type: errorType,
+        status,
+        message,
+      });
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === activeRequestIdRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [statusFilter, reasonFilter, areaSearch]);
+  }, [statusFilter, reasonFilter, facetFilter, areaSearch, offset]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const handleSelectFacet = (targetFacet) => {
+    const nextFacet = facetFilter === targetFacet ? 'ALL' : targetFacet;
+    setFacetFilter(nextFacet);
+    setOffset(0);
+  };
+
+  const handleSelectStatus = (newStatus) => {
+    setStatusFilter(newStatus);
+    setOffset(0);
+  };
+
+  const handleSelectReason = (newReason) => {
+    setReasonFilter(newReason);
+    setOffset(0);
+  };
 
   const getPriorityStyle = (priority) => {
     switch (String(priority).toLowerCase()) {
@@ -217,12 +295,8 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
     };
   };
 
-  // Filter items by facet if a category card is actively selected
-  const displayedItems = items.filter((item) => {
-    if (facetFilter === 'ALL') return true;
-    const cat = getCategoryBadge(item);
-    return cat.type === facetFilter;
-  });
+  // Authoritative server-filtered items directly displayed
+  const displayedItems = items;
 
   return (
     <View style={styles.container}>
@@ -235,7 +309,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       {isOffline && (
         <View style={styles.offlineBanner}>
           <Text style={styles.offlineText}>
-            ⚡ Offline mode: showing cached items. Adjudications will queue locally for sync.
+            ⚡ Offline mode: showing cached {facetFilter !== 'ALL' ? `"${facetFilter.replace(/_/g, ' ')}" ` : ''}data. Live synchronization pending.
           </Text>
         </View>
       )}
@@ -257,7 +331,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           contentContainerStyle={styles.summaryScroll}
         >
           {/* 1. Authoritative Backend Total */}
-          <Pressable onPress={() => setFacetFilter('ALL')}>
+          <Pressable onPress={() => handleSelectFacet('ALL')}>
             <Card
               padding="sm"
               style={[
@@ -274,7 +348,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </Pressable>
 
           {/* 2. Unconfirmed Violations (Pending Officer Review) */}
-          <Pressable onPress={() => setFacetFilter(facetFilter === 'unconfirmed_violations' ? 'ALL' : 'unconfirmed_violations')}>
+          <Pressable onPress={() => handleSelectFacet('unconfirmed_violations')}>
             <Card
               padding="sm"
               style={[
@@ -291,7 +365,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </Pressable>
 
           {/* 3. Confirmed Violations (Awaiting Enforcement Action) */}
-          <Pressable onPress={() => setFacetFilter(facetFilter === 'confirmed_violations' ? 'ALL' : 'confirmed_violations')}>
+          <Pressable onPress={() => handleSelectFacet('confirmed_violations')}>
             <Card
               padding="sm"
               style={[
@@ -308,7 +382,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </Pressable>
 
           {/* 4. Technical Recovery (OCR / Service Failure - Not a Legal Violation) */}
-          <Pressable onPress={() => setFacetFilter(facetFilter === 'technical_recovery' ? 'ALL' : 'technical_recovery')}>
+          <Pressable onPress={() => handleSelectFacet('technical_recovery')}>
             <Card
               padding="sm"
               style={[
@@ -325,7 +399,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </Pressable>
 
           {/* 5. Recapture Requirements (Missing or Unreadable Photos) */}
-          <Pressable onPress={() => setFacetFilter(facetFilter === 'recapture_required' ? 'ALL' : 'recapture_required')}>
+          <Pressable onPress={() => handleSelectFacet('recapture_required')}>
             <Card
               padding="sm"
               style={[
@@ -342,7 +416,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </Pressable>
 
           {/* 6. Low Confidence Assessments (< 60%) */}
-          <Pressable onPress={() => setFacetFilter(facetFilter === 'low_confidence' ? 'ALL' : 'low_confidence')}>
+          <Pressable onPress={() => handleSelectFacet('low_confidence')}>
             <Card
               padding="sm"
               style={[
@@ -368,7 +442,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
             <Pressable
               key={f.id}
               style={[styles.filterChip, statusFilter === f.id && styles.filterChipActive]}
-              onPress={() => setStatusFilter(f.id)}
+              onPress={() => handleSelectStatus(f.id)}
             >
               <Text style={[styles.filterChipText, statusFilter === f.id && styles.filterChipTextActive]}>
                 {f.label}
@@ -383,7 +457,7 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
             <Pressable
               key={r.id}
               style={[styles.subFilterChip, reasonFilter === r.id && styles.subFilterChipActive]}
-              onPress={() => setReasonFilter(r.id)}
+              onPress={() => handleSelectReason(r.id)}
             >
               <Text style={[styles.subFilterChipText, reasonFilter === r.id && styles.subFilterChipTextActive]}>
                 {r.label}
@@ -401,22 +475,28 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           placeholderTextColor={colors.placeholder}
           value={areaSearch}
           onChangeText={setAreaSearch}
-          onSubmitEditing={() => loadData()}
+          onSubmitEditing={() => {
+            setOffset(0);
+            loadData();
+          }}
           returnKeyType="search"
         />
       </View>
 
-      {/* Active Facet Indicator */}
-      {facetFilter !== 'ALL' && (
-        <View style={styles.facetBanner}>
-          <Text style={styles.facetBannerText}>
-            Filtering by category: <Text style={{ fontWeight: '700' }}>{facetFilter.replace(/_/g, ' ').toUpperCase()}</Text>
-          </Text>
-          <Pressable onPress={() => setFacetFilter('ALL')} hitSlop={6}>
-            <Text style={styles.facetClearBtn}>Show All ✕</Text>
+      {/* Matching Results Header */}
+      <View style={styles.resultsHeader}>
+        <Text style={styles.resultsCountText}>
+          {facetFilter !== 'ALL'
+            ? `${totalMatching} scan${totalMatching === 1 ? '' : 's'} in ${facetFilter.replace(/_/g, ' ')}`
+            : `${totalMatching} scan${totalMatching === 1 ? '' : 's'} matching`}
+          {totalMatching > 0 && ` (showing ${offset + 1}–${Math.min(offset + items.length, totalMatching)})`}
+        </Text>
+        {facetFilter !== 'ALL' && (
+          <Pressable onPress={() => handleSelectFacet('ALL')} hitSlop={6}>
+            <Text style={styles.facetClearBtn}>Clear Category ✕</Text>
           </Pressable>
-        </View>
-      )}
+        )}
+      </View>
 
       {/* Item List / States */}
       <ScrollView
@@ -433,13 +513,23 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
           </View>
         ) : loadError ? (
           <Card padding="lg" style={styles.errorCard}>
-            <Text style={styles.errorTitle}>⚠️ Review Queue Unavailable</Text>
-            <Text style={styles.errorDescription}>
-              Could not retrieve the review queue from the server:
+            <Text style={styles.errorTitle}>
+              {loadError.type === 'auth'
+                ? '🔒 Authentication Required'
+                : loadError.type === 'forbidden'
+                ? '🚫 Access Restricted'
+                : loadError.type === 'validation'
+                ? '⚠️ Filter Validation Error'
+                : '⚠️ Review Queue Unavailable'}
             </Text>
-            <Text style={styles.errorDetails}>{loadError}</Text>
+            <Text style={styles.errorDescription}>
+              {loadError.message}
+            </Text>
+            {loadError.status && (
+              <Text style={styles.errorDetails}>HTTP Status {loadError.status}</Text>
+            )}
             <View style={{ marginTop: spacing.md, width: '100%' }}>
-              <PrimaryButton title="Retry Connection" onPress={() => loadData()} />
+              <PrimaryButton title="Retry Request" onPress={() => loadData()} />
             </View>
           </Card>
         ) : displayedItems.length === 0 ? (
@@ -454,121 +544,159 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
             variant="neutral"
           />
         ) : (
-          displayedItems.map((item) => {
-            const pStyle = getPriorityStyle(item.priority);
-            const currentStatus = (item.review_status || item.status || 'OPEN').toUpperCase();
-            const sStyle = getStatusBadgeStyle(currentStatus);
-            const categoryBadge = getCategoryBadge(item);
-            const reasons = item.reasons || item.review_reasons || [];
-            const unconfirmedCount = item.unconfirmed_count ?? (item.findings?.filter((f) => f.needs_review)?.length || 0);
+          <>
+            {displayedItems.map((item) => {
+              const pStyle = getPriorityStyle(item.priority);
+              const currentStatus = (item.review_status || item.status || 'OPEN').toUpperCase();
+              const sStyle = getStatusBadgeStyle(currentStatus);
+              const categoryBadge = getCategoryBadge(item);
+              const reasons = item.reasons || item.review_reasons || [];
+              const unconfirmedCount = item.unconfirmed_count ?? (item.findings?.filter((f) => f.needs_review)?.length || 0);
 
-            // Determine truthful footer explanation
-            let footerGuidance = 'All findings verified';
-            if (categoryBadge.type === 'technical_recovery') {
-              footerGuidance = '⚙️ Technical Recovery Task (Not a Statutory Violation)';
-            } else if (categoryBadge.type === 'confirmed_violations') {
-              footerGuidance = '🚨 Confirmed Legal Violation — Enforcement Action Pending';
-            } else if (categoryBadge.type === 'recapture_required') {
-              footerGuidance = '📷 Evidence Recapture Required';
-            } else if (unconfirmedCount > 0) {
-              footerGuidance = `⚠️ ${unconfirmedCount} unconfirmed finding(s) require review`;
-            }
+              // Determine truthful footer guidance
+              let footerGuidance = 'All findings verified';
+              if (categoryBadge.type === 'technical_recovery') {
+                footerGuidance = '⚙️ Technical Recovery Task (Not a Statutory Violation)';
+              } else if (categoryBadge.type === 'confirmed_violations') {
+                footerGuidance = '🚨 Confirmed Legal Violation — Enforcement Action Pending';
+              } else if (categoryBadge.type === 'recapture_required') {
+                footerGuidance = '📷 Evidence Recapture Required';
+              } else if (unconfirmedCount > 0) {
+                footerGuidance = `⚠️ ${unconfirmedCount} unconfirmed finding(s) require review`;
+              }
 
-            return (
-              <Pressable
-                key={item.scan_id ? `scan-${item.scan_id}` : (item.review_id || `${item.inspection_id}-${item.scan_id}`)}
-                onPress={() => onSelectInspection && onSelectInspection(item.inspection_id)}
-              >
-                <Card padding="md" style={styles.itemCard}>
-                  {/* Top Header: ID, Priority, Status */}
-                  <View style={styles.rowBetween}>
-                    <Text style={styles.inspectionId}>
-                      INSP #{item.inspection_id} • SCAN #{item.scan_id}
-                    </Text>
-                    <View style={styles.rowAlign}>
-                      <View style={[styles.badge, { backgroundColor: pStyle.bg, borderColor: pStyle.border }]}>
-                        <Text style={[styles.badgeText, { color: pStyle.text }]}>
-                          {item.priority?.toUpperCase() || 'MEDIUM'}
-                        </Text>
-                      </View>
-                      <View style={[styles.badge, { backgroundColor: sStyle.bg, borderColor: sStyle.border, marginLeft: 6 }]}>
-                        <Text style={[styles.badgeText, { color: sStyle.text }]}>
-                          {currentStatus}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Category Badge */}
-                  <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
-                    <View
-                      style={[
-                        styles.categoryBadge,
-                        { backgroundColor: categoryBadge.bg, borderColor: categoryBadge.border },
-                      ]}
-                    >
-                      <Text style={[styles.categoryBadgeText, { color: categoryBadge.text }]}>
-                        {categoryBadge.label}
+              return (
+                <Pressable
+                  key={item.scan_id ? `scan-${item.scan_id}` : (item.review_id || `${item.inspection_id}-${item.scan_id}`)}
+                  onPress={() => onSelectInspection && onSelectInspection(item.inspection_id)}
+                >
+                  <Card padding="md" style={styles.itemCard}>
+                    {/* Top Header: ID, Priority, Status */}
+                    <View style={styles.rowBetween}>
+                      <Text style={styles.inspectionId}>
+                        INSP #{item.inspection_id} • SCAN #{item.scan_id}
                       </Text>
+                      <View style={styles.rowAlign}>
+                        <View style={[styles.badge, { backgroundColor: pStyle.bg, borderColor: pStyle.border }]}>
+                          <Text style={[styles.badgeText, { color: pStyle.text }]}>
+                            {item.priority?.toUpperCase() || 'MEDIUM'}
+                          </Text>
+                        </View>
+                        <View style={[styles.badge, { backgroundColor: sStyle.bg, borderColor: sStyle.border, marginLeft: 6 }]}>
+                          <Text style={[styles.badgeText, { color: sStyle.text }]}>
+                            {currentStatus}
+                          </Text>
+                        </View>
+                      </View>
                     </View>
-                  </View>
 
-                  {/* Store & Date Info */}
-                  <Text style={styles.storeName}>{item.store_name || 'Retail Establishment'}</Text>
-                  <Text style={styles.metaText}>
-                    {item.store_area ? `${item.store_area} • ` : ''}
-                    {item.inspection_date ? String(item.inspection_date).slice(0, 10) : 'Recent'} • Officer: {item.inspector_name || 'Assigned Officer'}
-                  </Text>
-
-                  {/* Commodity / Product info */}
-                  <Text style={styles.commodityText}>
-                    📦 {item.commodity_generic || 'Pre-packaged Commodity'} {item.brand_name ? `(${item.brand_name})` : ''}
-                  </Text>
-
-                  {/* Actionable Reasons Box */}
-                  {reasons.length > 0 && (
-                    <View style={styles.reasonsBox}>
-                      {reasons.map((r, idx) => {
-                        const isTech = r.subtype === 'technical_recovery';
-                        const isRecapture = r.subtype === 'incomplete_coverage';
-                        const isViolation = r.subtype === 'confirmed_violation' || r.subtype === 'unconfirmed_violation';
-                        return (
-                          <View key={idx} style={styles.reasonRow}>
-                            <Text
-                              style={[
-                                styles.reasonBullet,
-                                isTech ? { color: '#6D28D9' } : isViolation ? { color: colors.violation.text } : { color: colors.warning },
-                              ]}
-                            >
-                              •
-                            </Text>
-                            <Text style={styles.reasonDetail}>{r.detail}</Text>
-                          </View>
-                        );
-                      })}
+                    {/* Category Badge */}
+                    <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+                      <View
+                        style={[
+                          styles.categoryBadge,
+                          { backgroundColor: categoryBadge.bg, borderColor: categoryBadge.border },
+                        ]}
+                      >
+                        <Text style={[styles.categoryBadgeText, { color: categoryBadge.text }]}>
+                          {categoryBadge.label}
+                        </Text>
+                      </View>
                     </View>
-                  )}
 
-                  {/* Bottom Footer: Truthful Category Guidance & Action CTA */}
-                  <View style={[styles.rowBetween, styles.cardFooter]}>
-                    <Text
-                      style={[
-                        styles.unconfirmedText,
-                        categoryBadge.type === 'technical_recovery'
-                          ? { color: '#6D28D9' }
-                          : categoryBadge.type === 'confirmed_violations'
-                          ? { color: colors.violation.text }
-                          : { color: colors.warning },
-                      ]}
-                    >
-                      {footerGuidance}
+                    {/* Store & Date Info */}
+                    <Text style={styles.storeName}>{item.store_name || 'Retail Establishment'}</Text>
+                    <Text style={styles.metaText}>
+                      {item.store_area ? `${item.store_area} • ` : ''}
+                      {item.inspection_date ? String(item.inspection_date).slice(0, 10) : 'Recent'} • Officer: {item.inspector_name || 'Assigned Officer'}
                     </Text>
-                    <Text style={styles.actionCta}>Open Adjudication →</Text>
-                  </View>
-                </Card>
-              </Pressable>
-            );
-          })
+
+                    {/* Commodity / Product info */}
+                    <Text style={styles.commodityText}>
+                      📦 {item.commodity_generic || 'Pre-packaged Commodity'} {item.brand_name ? `(${item.brand_name})` : ''}
+                    </Text>
+
+                    {/* Actionable Reasons Box */}
+                    {reasons.length > 0 && (
+                      <View style={styles.reasonsBox}>
+                        {reasons.map((r, idx) => {
+                          const isTech = r.subtype === 'technical_recovery';
+                          const isViolation = r.subtype === 'confirmed_violation' || r.subtype === 'unconfirmed_violation';
+                          return (
+                            <View key={idx} style={styles.reasonRow}>
+                              <Text
+                                style={[
+                                  styles.reasonBullet,
+                                  isTech ? { color: '#6D28D9' } : isViolation ? { color: colors.violation.text } : { color: colors.warning },
+                                ]}
+                              >
+                                •
+                              </Text>
+                              <Text style={styles.reasonDetail}>{r.detail}</Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+
+                    {/* Bottom Footer: Truthful Category Guidance & Action CTA */}
+                    <View style={[styles.rowBetween, styles.cardFooter]}>
+                      <Text
+                        style={[
+                          styles.unconfirmedText,
+                          categoryBadge.type === 'technical_recovery'
+                            ? { color: '#6D28D9' }
+                            : categoryBadge.type === 'confirmed_violations'
+                            ? { color: colors.violation.text }
+                            : { color: colors.warning },
+                        ]}
+                      >
+                        {footerGuidance}
+                      </Text>
+                      <Text style={styles.actionCta}>Open Adjudication →</Text>
+                    </View>
+                  </Card>
+                </Pressable>
+              );
+            })}
+
+            {/* Pagination Controls */}
+            {totalMatching > PAGE_SIZE && (
+              <View style={styles.paginationRow}>
+                <Pressable
+                  style={[styles.pageButton, offset === 0 && styles.pageButtonDisabled]}
+                  disabled={offset === 0 || loading}
+                  onPress={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+                >
+                  <Text style={[styles.pageButtonText, offset === 0 && styles.pageButtonTextDisabled]}>
+                    ← Previous
+                  </Text>
+                </Pressable>
+
+                <Text style={styles.pageInfoText}>
+                  Page {Math.floor(offset / PAGE_SIZE) + 1} of {Math.ceil(totalMatching / PAGE_SIZE) || 1}
+                </Text>
+
+                <Pressable
+                  style={[
+                    styles.pageButton,
+                    offset + items.length >= totalMatching && styles.pageButtonDisabled,
+                  ]}
+                  disabled={offset + items.length >= totalMatching || loading}
+                  onPress={() => setOffset((prev) => prev + PAGE_SIZE)}
+                >
+                  <Text
+                    style={[
+                      styles.pageButtonText,
+                      offset + items.length >= totalMatching && styles.pageButtonTextDisabled,
+                    ]}
+                  >
+                    Next →
+                  </Text>
+                </Pressable>
+              </View>
+            )}
+          </>
         )}
       </ScrollView>
     </View>
@@ -703,24 +831,59 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.text,
   },
-  facetBanner: {
+  resultsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#F8FAFC',
     paddingHorizontal: spacing.md,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderBottomWidth: 1,
-    borderColor: '#BFDBFE',
+    borderColor: colors.borderLight,
   },
-  facetBannerText: {
-    fontSize: 11,
-    color: colors.niyamBlue,
+  resultsCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
   },
   facetClearBtn: {
     fontSize: 11,
     fontWeight: '700',
     color: colors.niyamBlue,
+  },
+  paginationRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    marginTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
+  },
+  pageButton: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+  },
+  pageButtonDisabled: {
+    opacity: 0.4,
+    borderColor: colors.borderLight,
+  },
+  pageButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.netraTeal,
+  },
+  pageButtonTextDisabled: {
+    color: colors.textMuted,
+  },
+  pageInfoText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
   },
   scroll: {
     flex: 1,
