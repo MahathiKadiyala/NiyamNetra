@@ -14,7 +14,7 @@ import Header from '../../components/Header';
 import Card from '../../components/Card';
 import VerdictBadge from '../../components/VerdictBadge';
 import PrimaryButton from '../../components/PrimaryButton';
-import { enqueueInspection } from '../../offline/queue';
+import { enqueueInspection, invalidateReviewQueue } from '../../offline/queue';
 import { submitInspection, createInspection } from '../../api/inspections';
 
 const SIGNATURE_STATUSES = [
@@ -94,6 +94,7 @@ export default function InspectionSummaryScreen({
           liveSubmitted = true;
           setIsLiveSubmitted(true);
           setSubmissionRecord(finalSubmissionRecord);
+          await invalidateReviewQueue(null, 'inspection_finalized');
         } catch (subErr) {
           console.warn('[Summary] Live submit failed, enqueuing for sync:', subErr?.message || subErr);
         }

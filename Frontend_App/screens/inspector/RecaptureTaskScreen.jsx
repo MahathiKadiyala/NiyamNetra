@@ -31,6 +31,7 @@ import {
   enqueueReassessmentTrigger,
   cacheRecaptureTasks,
   loadCachedRecaptureTasks,
+  invalidateReviewQueue,
 } from '../../offline/queue';
 
 export default function RecaptureTaskScreen({ inspectionId, scanId, onBack, onComplete }) {
@@ -186,6 +187,7 @@ export default function RecaptureTaskScreen({ inspectionId, scanId, onBack, onCo
           });
         }
 
+        await invalidateReviewQueue(null, 'recapture_reassessment');
         setNotification({
           type: 'success',
           text: `Capture task fulfilled and scan reassessed (Attempt ${currentAttempt}).`,
@@ -241,6 +243,7 @@ export default function RecaptureTaskScreen({ inspectionId, scanId, onBack, onCo
         inspection_id: Number(inspectionId),
         skip_reason: skipReason.trim(),
       });
+      await invalidateReviewQueue(null, 'recapture_skip');
       setSkipModalTask(null);
       setNotification({
         type: 'success',

@@ -108,6 +108,115 @@ export function resetReviewCacheSession() {
   return currentSessionGeneration;
 }
 
+let currentQueueDataRevision = 1;
+
+/**
+ * Return current review cache data revision counter.
+ * Monotonically incremented on inspection/adjudication mutations to discard in-flight queries
+ * started prior to the mutation.
+ */
+export function getReviewCacheDataRevision() {
+  return currentQueueDataRevision;
+}
+
+/**
+ * Bump review cache data revision counter.
+ * Invalidates in-flight queue queries initiated before this mutation without logging out or modifying auth session.
+ */
+export function bumpReviewCacheDataRevision() {
+  currentQueueDataRevision++;
+  return currentQueueDataRevision;
+}
+
+/**
+ * Reset review cache data revision counter (for testing).
+ */
+export function resetReviewCacheDataRevision() {
+  currentQueueDataRevision = 1;
+  return currentQueueDataRevision;
+}
+
+const queueInvalidationListeners = new Set();
+
+/**
+ * Register a listener invoked whenever the review queue is invalidated due to a mutation.
+ * Returns an unregister function.
+ */
+export function onReviewQueueInvalidated(listener) {
+  if (typeof listener === 'function') {
+    queueInvalidationListeners.add(listener);
+    return () => queueInvalidationListeners.delete(listener);
+  }
+  return () => {};
+}
+
+/**
+ * Emit review queue invalidation event to all active listeners.
+ */
+export function emitReviewQueueInvalidated(event) {
+  for (const listener of queueInvalidationListeners) {
+    try {
+      listener(event);
+    } catch (e) {
+      console.warn('[reviewCacheKey] error in invalidation listener:', e?.message || e);
+    }
+  }
+}
+
+/**
+ * Clear queue invalidation listeners (for testing).
+ */
+export function clearReviewQueueInvalidationListeners() {
+  queueInvalidationListeners.clear();
+}
+
+/**
+ * Core invalidation logic:
+ * Resolves effective scope, bumps data revision, invokes onClearCache callback if provided,
+ * and emits invalidation event to registered listeners.
+ */
+export async function invalidateReviewQueueCore(userScope = null, reason = 'mutation', onClearCache = null) {
+  try {
+    const currentScope = normalizeUserScope(userScope);
+    const scopeStr = currentScope ? currentScope.scopeStr : null;
+
+    const revision = bumpReviewCacheDataRevision();
+
+    if (typeof onClearCache === 'function') {
+      try {
+        await onClearCache(scopeStr);
+      } catch {}
+    }
+
+    const event = {
+      scope: scopeStr,
+      revision,
+      reason,
+      timestamp: new Date().toISOString(),
+    };
+    emitReviewQueueInvalidated(event);
+
+    return {
+      invalidated: true,
+      scope: scopeStr,
+      revision,
+      reason,
+    };
+  } catch (err) {
+    return {
+      invalidated: false,
+      error: err?.message || err,
+    };
+  }
+}
+
+/**
+ * Standalone invalidation helper (evaluated in tests or pure-JS environments).
+ */
+export async function invalidateReviewQueue(userScope = null, reason = 'mutation', onClearCache = null) {
+  return invalidateReviewQueueCore(userScope, reason, onClearCache);
+}
+
 let lastKnownEffectiveScopeStr = null;
 
 /**

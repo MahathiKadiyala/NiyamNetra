@@ -8,6 +8,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   TextInput,
+  AppState,
   StyleSheet,
 } from 'react-native';
 import { colors, spacing, typography, radius, shadows } from '../../theme';
@@ -17,12 +18,15 @@ import EmptyState from '../../components/EmptyState';
 import PrimaryButton from '../../components/PrimaryButton';
 import { fetchReviewQueue, fetchReviewSummary } from '../../api/review';
 import { getAccessToken, getCurrentUser } from '../../api/client';
+import { useOnlineStatus } from '../../hooks/useOnlineStatus';
 import {
   cacheReviewQueue,
   loadCachedReviewQueue,
   cacheReviewSummary,
   loadCachedReviewSummary,
   getReviewCacheSessionId,
+  getReviewCacheDataRevision,
+  onReviewQueueInvalidated,
   normalizeUserScope,
 } from '../../offline/queue';
 
@@ -57,6 +61,8 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
   const [isOffline, setIsOffline] = useState(false);
   const [loadError, setLoadError] = useState(null);
 
+  const isOnlineNetwork = useOnlineStatus();
+  const prevOnlineRef = React.useRef(isOnlineNetwork);
   const activeRequestIdRef = React.useRef(0);
 
   const loadData = useCallback(async (isRefresh = false) => {
@@ -67,9 +73,10 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
 
     const filterKey = facetFilter !== 'ALL' ? facetFilter : 'ALL';
 
-    // Capture active authenticated scope and session generation at request start
+    // Capture active authenticated scope, session generation, and data revision at request start
     const requestScope = normalizeUserScope(getCurrentUser() || getAccessToken());
     const requestSessionId = getReviewCacheSessionId();
+    const requestRevision = getReviewCacheDataRevision();
 
     try {
       const queueParams = {
@@ -94,13 +101,23 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
         fetchReviewSummary(),
       ]);
 
-      // Late response from an earlier category or offset request must not overwrite active state
-      if (requestId !== activeRequestIdRef.current) {
+      // Late response from an earlier category, offset request, or from before a mutation must not overwrite active state
+      if (
+        requestId !== activeRequestIdRef.current ||
+        getReviewCacheDataRevision() !== requestRevision
+      ) {
         return;
       }
 
       const rawItems = Array.isArray(queueData) ? queueData : queueData?.items || [];
       const matchingCount = typeof queueData?.total === 'number' ? queueData.total : rawItems.length;
+
+      // Pagination boundary recovery: if a mutation or filter change reduced total items below current offset
+      if (offset > 0 && matchingCount > 0 && offset >= matchingCount) {
+        const maxValidOffset = Math.max(0, Math.floor((matchingCount - 1) / PAGE_SIZE) * PAGE_SIZE);
+        setOffset(maxValidOffset);
+        return;
+      }
 
       // Deduplicate scans by scan_id to ensure stable scan identity
       const seenScans = new Set();
@@ -119,10 +136,11 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
       setIsOffline(false);
       setLoadError(null);
 
-      // Persist to cache, binding write to the session scope and generation of the initiating request
+      // Persist to cache, binding write to the session scope, generation, and data revision of the initiating request
       const sessionBinding = {
         scope: requestScope,
         sessionId: requestSessionId,
+        revision: requestRevision,
       };
 
       await Promise.all([
@@ -135,7 +153,10 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
         cacheReviewSummary(summaryData, queueParams, sessionBinding),
       ]);
     } catch (err) {
-      if (requestId !== activeRequestIdRef.current) {
+      if (
+        requestId !== activeRequestIdRef.current ||
+        getReviewCacheDataRevision() !== requestRevision
+      ) {
         return;
       }
 
@@ -194,6 +215,39 @@ export default function ReviewQueueScreen({ onSelectInspection, onBack }) {
 
   useEffect(() => {
     loadData();
+  }, [loadData]);
+
+  // Invalidation listener: refresh when an inspection mutation occurs (adjudication, recapture, finalization, sync)
+  useEffect(() => {
+    let timer = null;
+    const unsub = onReviewQueueInvalidated(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        loadData(true);
+      }, 80);
+    });
+    return () => {
+      unsub();
+      if (timer) clearTimeout(timer);
+    };
+  }, [loadData]);
+
+  // Reconnection listener: refresh authoritative queue when device regains connectivity
+  useEffect(() => {
+    if (!prevOnlineRef.current && isOnlineNetwork) {
+      loadData(true);
+    }
+    prevOnlineRef.current = isOnlineNetwork;
+  }, [isOnlineNetwork, loadData]);
+
+  // App focus listener: refresh when returning to the app
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        loadData(true);
+      }
+    });
+    return () => sub.remove();
   }, [loadData]);
 
   const handleSelectFacet = (targetFacet) => {

@@ -405,6 +405,13 @@ import {
   getReviewCacheSessionId,
   bumpReviewCacheSessionId,
   resetReviewCacheSession,
+  getReviewCacheDataRevision,
+  bumpReviewCacheDataRevision,
+  resetReviewCacheDataRevision,
+  invalidateReviewQueueCore,
+  onReviewQueueInvalidated,
+  emitReviewQueueInvalidated,
+  clearReviewQueueInvalidationListeners,
   evaluateAuthorizationScopeChange,
 } from './reviewCacheKey';
 
@@ -424,6 +431,13 @@ export {
   getReviewCacheSessionId,
   bumpReviewCacheSessionId,
   resetReviewCacheSession,
+  getReviewCacheDataRevision,
+  bumpReviewCacheDataRevision,
+  resetReviewCacheDataRevision,
+  invalidateReviewQueueCore,
+  onReviewQueueInvalidated,
+  emitReviewQueueInvalidated,
+  clearReviewQueueInvalidationListeners,
   evaluateAuthorizationScopeChange,
 };
 
@@ -597,7 +611,16 @@ export async function cacheReviewQueue(payload, queryParams = {}, sessionBinding
         return false;
       }
 
-      // 2. Check principal & role scope identity
+      // 2. Check data revision (bumped on inspection/adjudication mutation)
+      const currentDataRevision = getReviewCacheDataRevision();
+      if (
+        sessionBinding.revision !== undefined &&
+        sessionBinding.revision !== currentDataRevision
+      ) {
+        return false;
+      }
+
+      // 3. Check principal & role scope identity
       const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
       if (!boundScope || boundScope.scopeStr !== currentScope.scopeStr) {
         return false;
@@ -703,6 +726,14 @@ export async function cacheReviewSummary(summary, params = {}, sessionBinding = 
         return false;
       }
 
+      const currentDataRevision = getReviewCacheDataRevision();
+      if (
+        sessionBinding.revision !== undefined &&
+        sessionBinding.revision !== currentDataRevision
+      ) {
+        return false;
+      }
+
       const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
       if (!boundScope || boundScope.scopeStr !== currentScope.scopeStr) {
         return false;
@@ -790,14 +821,17 @@ export async function loadCachedReviewSummary(params = {}, userScope = null) {
  */
 export async function clearReviewQueueCache(userScope = null, options = {}) {
   try {
-    // Invalidate in-flight writes immediately
-    bumpReviewCacheSessionId();
+    const { legacyOnly = false, preserveSession = false } = options;
+
+    // Invalidate in-flight writes immediately unless preserveSession is requested
+    if (!preserveSession) {
+      bumpReviewCacheSessionId();
+    }
 
     const scope = userScope !== null && userScope !== undefined
       ? normalizeUserScope(userScope)
       : null;
     const scopeStr = scope ? scope.scopeStr : (typeof userScope === 'string' && userScope.trim() ? userScope.trim() : null);
-    const { legacyOnly = false } = options;
 
     if (isWeb) {
       if (!globalThis.localStorage) return;
@@ -855,6 +889,23 @@ export async function clearReviewQueueCache(userScope = null, options = {}) {
       }
     }
   } catch {}
+}
+
+/**
+ * Invalidate cached review queue pages and summary metrics after a confirmed mutation.
+ *
+ * Requirements:
+ * 1. Monotonically bumps queue data revision counter (tracked independently from session generation).
+ * 2. Purges cached queue pages and summary metrics for the target authorization scope.
+ * 3. Does not bump session generation (so current authenticated session and token stay intact).
+ * 4. Fails safely: if scope cannot be determined, purges review cache without touching drafts, photos, or manifests.
+ * 5. Notifies registered UI listeners so active screens can refresh live data.
+ */
+export async function invalidateReviewQueue(userScope = null, reason = 'mutation') {
+  const currentScope = normalizeUserScope(userScope || getCurrentUser() || getAccessToken());
+  return invalidateReviewQueueCore(currentScope, reason, async (scopeStr) => {
+    await clearReviewQueueCache(scopeStr, { preserveSession: true });
+  });
 }
 
 export async function enqueueRecaptureTaskFulfillment({

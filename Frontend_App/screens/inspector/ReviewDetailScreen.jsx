@@ -24,6 +24,7 @@ import {
 import {
   enqueueAdjudication,
   enqueueConflictResolution,
+  invalidateReviewQueue,
 } from '../../offline/queue';
 
 export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated, onOpenRecapture, onOpenReport }) {
@@ -110,8 +111,10 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
         reason: defaultReason,
         human_verdict: finding.engine_verdict,
       });
+      await invalidateReviewQueue(null, 'adjudication_accept');
       setNotification({ type: 'success', text: `Check ${finding.check_id} accepted as ${finding.engine_verdict}.` });
       await loadDetail();
+      if (onAdjudicated) onAdjudicated();
     } catch (err) {
       // Offline fallback
       await enqueueAdjudication({
@@ -154,6 +157,7 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
         reason: overrideReason.trim(),
         human_verdict: overrideVerdict,
       });
+      await invalidateReviewQueue(null, 'adjudication_override');
       setActiveModal(null);
       setNotification({
         type: 'success',
@@ -195,6 +199,7 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
         reason: generalReason.trim(),
         resolution_notes: resolutionNotes.trim() || undefined,
       });
+      await invalidateReviewQueue(null, `adjudication_${generalAction}`);
       setActiveModal(null);
       setNotification({
         type: 'success',
@@ -236,9 +241,11 @@ export default function ReviewDetailScreen({ inspectionId, onBack, onAdjudicated
         resolved_value: conflictResolvedValue.trim() || undefined,
         reason: conflictReason.trim(),
       });
+      await invalidateReviewQueue(null, 'conflict_resolution');
       setActiveModal(null);
       setNotification({ type: 'success', text: 'Cross-panel conflict resolved and audit trail updated.' });
       await loadDetail();
+      if (onAdjudicated) onAdjudicated();
     } catch (err) {
       await enqueueConflictResolution({
         inspection_id: Number(inspectionId),

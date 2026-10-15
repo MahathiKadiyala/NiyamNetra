@@ -11,6 +11,7 @@ import {
   queueSize,
   syncFailedCount,
   retryFailed,
+  invalidateReviewQueue,
 } from './queue';
 
 const SyncContext = createContext({
@@ -371,6 +372,9 @@ export function SyncProvider({ children }) {
         setLastSync(new Date().toISOString());
         consecutiveFailures.current = 0;
         backoffUntil.current = 0;
+        try {
+          await invalidateReviewQueue(null, 'offline_sync');
+        } catch {}
       } else {
         // Park the automatic timer (see backoffUntil). A manual pull is not
         // affected — the gate lives in maybeSync below, not in syncNow.

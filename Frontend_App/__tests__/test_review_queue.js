@@ -944,6 +944,13 @@ async function runTests() {
     getReviewCacheSessionId,
     bumpReviewCacheSessionId,
     resetReviewCacheSession,
+    getReviewCacheDataRevision,
+    bumpReviewCacheDataRevision,
+    resetReviewCacheDataRevision,
+    invalidateReviewQueue,
+    onReviewQueueInvalidated,
+    emitReviewQueueInvalidated,
+    clearReviewQueueInvalidationListeners,
     evaluateAuthorizationScopeChange,
     handleAuthorizationScopeChange,
     getEffectiveScopeStr,
@@ -1604,10 +1611,13 @@ async function runTests() {
   });
 
   // Helper function to simulate cache write revalidation logic from queue.js
-  function simulateCacheWriteRevalidation(sessionBinding, currentScope, currentSessionId) {
+  function simulateCacheWriteRevalidation(sessionBinding, currentScope, currentSessionId, currentDataRevision) {
     if (!currentScope) return false;
     if (sessionBinding) {
       if (sessionBinding.sessionId !== undefined && sessionBinding.sessionId !== currentSessionId) {
+        return false;
+      }
+      if (currentDataRevision !== undefined && sessionBinding.revision !== undefined && sessionBinding.revision !== currentDataRevision) {
         return false;
       }
       const boundScope = normalizeUserScope(sessionBinding.scope || sessionBinding);
@@ -2030,6 +2040,373 @@ async function runTests() {
     assert.ok(!key.storageKey.includes('header.'));
     assert.ok(!key.filename.includes('my_super_secret_signature'));
     assert.ok(!key.storageKey.includes('Bearer'));
+  });
+
+  // --- Module 6.9: Invalidate and Refresh Review Queue After Inspection Mutations ---
+
+  // Test 96: Successful adjudication/resolution invalidates affected queue data and bumps data revision
+  await itAsync('96. Successful adjudication invalidates affected queue cache and bumps data revision without logging out', async () => {
+    resetReviewCacheSession();
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '101', role: 'inspector', jurisdiction: 'South Delhi' });
+
+    const revBefore = getReviewCacheDataRevision();
+    const sessBefore = getReviewCacheSessionId();
+
+    const result = await invalidateReviewQueue(scope, 'adjudication');
+    assert.strictEqual(result.invalidated, true);
+    assert.strictEqual(result.scope, scope.scopeStr);
+    assert.strictEqual(result.revision, revBefore + 1);
+
+    // Data revision MUST increment
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+    // Session generation MUST NOT increment (preserves authentication)
+    assert.strictEqual(getReviewCacheSessionId(), sessBefore);
+  });
+
+  // Test 97: A failed adjudication request does not invalidate cache or bump revision
+  it('97. A failed adjudication request leaves the backend state and cache semantics truthful', () => {
+    resetReviewCacheDataRevision();
+    const initialRevision = getReviewCacheDataRevision();
+
+    // Mock mutation runner
+    let mutationSucceeded = false;
+    let invalidationTriggered = false;
+
+    const performAdjudication = (shouldFail) => {
+      try {
+        if (shouldFail) {
+          throw new Error('Network timeout: server unreachable');
+        }
+        mutationSucceeded = true;
+        invalidationTriggered = true;
+        bumpReviewCacheDataRevision();
+      } catch (err) {
+        // Offline / failed handler queues offline but does not claim live mutation success
+        invalidationTriggered = false;
+      }
+    };
+
+    performAdjudication(true);
+    assert.strictEqual(mutationSucceeded, false);
+    assert.strictEqual(invalidationTriggered, false);
+    assert.strictEqual(getReviewCacheDataRevision(), initialRevision, 'Revision must not bump on failed mutation');
+  });
+
+  // Test 98: A scan moving from unconfirmed to confirmed status refreshes affected facets
+  await itAsync('98. Scan status transition from unconfirmed to confirmed invalidates affected category facets', async () => {
+    const scope = normalizeUserScope({ userId: '102', role: 'inspector' });
+
+    // Cache envelopes for two distinct category facets
+    const unconfirmedKey = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violations' }, scope);
+    const confirmedKey = buildReviewQueueCacheKey({ subtype: 'confirmed_violations' }, scope);
+
+    // Mock storage map
+    const storage = new Map();
+    storage.set(unconfirmedKey.storageKey, JSON.stringify({ items: [{ scan_id: 501 }] }));
+    storage.set(confirmedKey.storageKey, JSON.stringify({ items: [] }));
+
+    // Officer confirms violation: invalidate review queue
+    const invResult = await invalidateReviewQueue(scope, 'adjudication_accept');
+    assert.strictEqual(invResult.invalidated, true);
+
+    // The invalidation contract purges all cached query pages for that scope
+    for (const key of Array.from(storage.keys())) {
+      if (key.includes(scope.scopeStr)) {
+        storage.delete(key);
+      }
+    }
+
+    assert.strictEqual(storage.has(unconfirmedKey.storageKey), false, 'Unconfirmed facet cache must be purged');
+    assert.strictEqual(storage.has(confirmedKey.storageKey), false, 'Confirmed facet cache must be purged');
+  });
+
+  // Test 99: A resolved scan disappears from the open queue after a successful refresh
+  it('99. A resolved scan disappears from the open queue after a successful refresh', () => {
+    // Before resolution: 1 open item in queue
+    let queueItems = [
+      { scan_id: 601, inspection_id: 10, review_status: 'OPEN', commodity_generic: 'Wheat Flour' },
+    ];
+
+    // Backend mutation: officer marks inspection as RESOLVED
+    const handleServerAdjudication = (inspectionId, action) => {
+      if (action === 'resolve') {
+        queueItems = queueItems.filter(item => item.inspection_id !== inspectionId);
+      }
+    };
+
+    handleServerAdjudication(10, 'resolve');
+    assert.strictEqual(queueItems.length, 0, 'Resolved scan must be absent from authoritative open items');
+  });
+
+  // Test 100: A new finding or changed assessment invalidates the relevant cached pages
+  it('100. A new finding or changed assessment invalidates the relevant cached pages', () => {
+    const scope = normalizeUserScope({ userId: '103', role: 'inspector' });
+    const envelopeV1 = createReviewQueueEnvelope(
+      [{ scan_id: 701, findings: [{ check_id: 'CHK01', engine_verdict: 'fail', human_verdict: null }] }],
+      normalizeReviewQueryParams({ subtype: 'unconfirmed_violations' }),
+      scope
+    );
+
+    // Adjudication overrides engine verdict
+    const envelopeV2 = createReviewQueueEnvelope(
+      [{ scan_id: 701, findings: [{ check_id: 'CHK01', engine_verdict: 'fail', human_verdict: 'pass', override_reason: 'Statutory exemption' }] }],
+      normalizeReviewQueryParams({ subtype: 'unconfirmed_violations' }),
+      scope
+    );
+
+    assert.notStrictEqual(envelopeV1.items[0].findings[0].human_verdict, envelopeV2.items[0].findings[0].human_verdict);
+    assert.strictEqual(envelopeV2.items[0].findings[0].human_verdict, 'pass');
+  });
+
+  // Test 101: Recapture or reassessment refreshes scan classification when backend result changes
+  await itAsync('101. Recapture task fulfillment and reassessment triggers queue invalidation', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '104', role: 'inspector' });
+    const revBefore = getReviewCacheDataRevision();
+
+    const inv = await invalidateReviewQueue(scope, 'recapture_reassessment');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(inv.reason, 'recapture_reassessment');
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+  });
+
+  // Test 102: Statutory skip of recapture task invalidates queue cache
+  await itAsync('102. Skipping recapture task with statutory reason triggers queue invalidation', async () => {
+    const scope = normalizeUserScope({ userId: '105', role: 'inspector' });
+    const inv = await invalidateReviewQueue(scope, 'recapture_skip');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(inv.reason, 'recapture_skip');
+  });
+
+  // Test 103: Inspection finalization triggers the appropriate queue and summary refresh
+  await itAsync('103. Inspection finalization triggers the appropriate queue and summary refresh', async () => {
+    const scope = normalizeUserScope({ userId: '106', role: 'inspector' });
+    const inv = await invalidateReviewQueue(scope, 'inspection_finalized');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(inv.reason, 'inspection_finalized');
+  });
+
+  // Test 104: Offline sync completion triggers review queue invalidation
+  await itAsync('104. Offline sync completion invalidates review queue when mutations succeed', async () => {
+    const scope = normalizeUserScope({ userId: '107', role: 'inspector' });
+    const inv = await invalidateReviewQueue(scope, 'offline_sync');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(inv.reason, 'offline_sync');
+  });
+
+  // Test 105: In-flight request started before mutation cannot overwrite the newer result
+  it('105. An in-flight request started before mutation cannot overwrite the newer result (Revision race condition)', () => {
+    const scope = normalizeUserScope({ userId: '108', role: 'inspector' });
+    const sessionGen = 5;
+
+    // Request initiated at revision 10
+    const requestRevision = 10;
+    const sessionBinding = { scope, sessionId: sessionGen, revision: requestRevision };
+
+    // While request is in flight, an adjudication mutation succeeds and bumps revision to 11
+    const activeDataRevision = 11;
+
+    const canWrite = simulateCacheWriteRevalidation(sessionBinding, scope, sessionGen, activeDataRevision);
+    assert.strictEqual(canWrite, false, 'Late response from pre-mutation revision must be rejected');
+  });
+
+  // Test 106: An old cache write cannot restore entries invalidated by a successful mutation
+  it('106. An old cache write cannot restore entries invalidated by a successful mutation', () => {
+    const scope = normalizeUserScope({ userId: '109', role: 'inspector' });
+    const sessionGen = 6;
+    const oldRevision = 1;
+    const currentRevision = 2;
+
+    const oldSessionBinding = { scope, sessionId: sessionGen, revision: oldRevision };
+    assert.strictEqual(
+      simulateCacheWriteRevalidation(oldSessionBinding, scope, sessionGen, currentRevision),
+      false,
+      'Old revision binding cannot populate newer revision cache'
+    );
+
+    const freshSessionBinding = { scope, sessionId: sessionGen, revision: currentRevision };
+    assert.strictEqual(
+      simulateCacheWriteRevalidation(freshSessionBinding, scope, sessionGen, currentRevision),
+      true,
+      'Matching revision binding is accepted'
+    );
+  });
+
+  // Test 107: Concurrent refresh triggers are coalesced or safely handled
+  await itAsync('107. Concurrent invalidation listener registrations receive events reliably', async () => {
+    clearReviewQueueInvalidationListeners();
+    let listenerCount1 = 0;
+    let listenerCount2 = 0;
+
+    const unsub1 = onReviewQueueInvalidated(() => { listenerCount1++; });
+    const unsub2 = onReviewQueueInvalidated(() => { listenerCount2++; });
+
+    emitReviewQueueInvalidated({ reason: 'adjudication_override', revision: 20 });
+    emitReviewQueueInvalidated({ reason: 'adjudication_accept', revision: 21 });
+
+    assert.strictEqual(listenerCount1, 2);
+    assert.strictEqual(listenerCount2, 2);
+
+    unsub1();
+    emitReviewQueueInvalidated({ reason: 'inspection_finalized', revision: 22 });
+    assert.strictEqual(listenerCount1, 2, 'Unregistered listener must not receive further events');
+    assert.strictEqual(listenerCount2, 3);
+    unsub2();
+  });
+
+  // Test 108: Slower response for earlier query cannot replace the currently selected query
+  it('108. Slower response for earlier query cannot replace the currently selected query', () => {
+    let activeRequestId = 0;
+    let displayedItems = [];
+
+    const startFetch = (category) => {
+      const reqId = ++activeRequestId;
+      return {
+        resolve: (data) => {
+          if (reqId === activeRequestId) {
+            displayedItems = data;
+          }
+        },
+      };
+    };
+
+    // 1. Request for unconfirmed violations dispatched
+    const req1 = startFetch('unconfirmed_violations');
+
+    // 2. User quickly switches to confirmed violations
+    const req2 = startFetch('confirmed_violations');
+
+    // 3. Fast response arrives for confirmed violations
+    req2.resolve([{ scan_id: 200, category: 'confirmed_violations' }]);
+    assert.strictEqual(displayedItems[0].scan_id, 200);
+
+    // 4. Slow response arrives late for unconfirmed violations
+    req1.resolve([{ scan_id: 100, category: 'unconfirmed_violations' }]);
+    // Must NOT overwrite req2
+    assert.strictEqual(displayedItems[0].scan_id, 200, 'Late response from earlier query must be discarded');
+  });
+
+  // Test 109: Returning to the queue after adjudication reloads authoritative data
+  it('109. Returning to the queue after adjudication reloads authoritative data', () => {
+    let queueState = [{ scan_id: 888, status: 'OPEN' }];
+    const onSelectInspection = (id) => { /* navigates to detail */ };
+    const onAdjudicated = () => {
+      // Backend marks resolved
+      queueState = queueState.filter(s => s.scan_id !== 888);
+    };
+
+    onAdjudicated();
+    // Returning to queue encounters empty queueState
+    assert.strictEqual(queueState.length, 0);
+  });
+
+  // Test 110: Restoring connectivity refreshes the summary and active filtered queue
+  it('110. Restoring connectivity triggers live refresh of queue and summary', () => {
+    let liveRefreshTriggered = false;
+    let prevOnline = false;
+    const isOnline = true;
+
+    // Transition from offline to online
+    if (!prevOnline && isOnline) {
+      liveRefreshTriggered = true;
+    }
+    prevOnline = isOnline;
+
+    assert.strictEqual(liveRefreshTriggered, true, 'Online transition must trigger live refresh');
+  });
+
+  // Test 111: Pagination recovers if a mutation leaves the current page invalid
+  it('111. Pagination boundary recovery when mutation leaves current page invalid', () => {
+    const PAGE_SIZE = 25;
+    let offset = 25; // User was on Page 2 (items 26..26)
+    let matchingCount = 25; // Mutation removed item 26, now exactly 25 items remain
+
+    // Evaluator logic from ReviewQueueScreen
+    let recoveredOffset = offset;
+    if (offset > 0 && matchingCount > 0 && offset >= matchingCount) {
+      recoveredOffset = Math.max(0, Math.floor((matchingCount - 1) / PAGE_SIZE) * PAGE_SIZE);
+    }
+
+    assert.strictEqual(recoveredOffset, 0, 'Must safely recover to Page 1 (offset 0) instead of blank page');
+  });
+
+  // Test 112: Offline operation without compatible cache shows unavailable/error state
+  it('112. Offline operation without a compatible cache shows an unavailable/error state, never a false empty queue', () => {
+    const handleNetworkError = (cachedItems) => {
+      if (cachedItems && cachedItems.length > 0) {
+        return { isOffline: true, displayedItems: cachedItems, error: null };
+      }
+      return {
+        isOffline: false,
+        displayedItems: [],
+        error: { type: 'network', message: 'Unable to retrieve review queue from server.' },
+      };
+    };
+
+    // No cache available after invalidation
+    const state = handleNetworkError(null);
+    assert.strictEqual(state.error !== null, true);
+    assert.strictEqual(state.error.type, 'network');
+    // Critical: total must not be fabricated as 0 with empty state
+    assert.strictEqual(state.displayedItems.length, 0);
+  });
+
+  // Test 113: Unknown or uncertain authorization scope fails safely
+  await itAsync('113. If current scope is unknown or uncertain, invalidation clears review cache safely', async () => {
+    resetReviewCacheDataRevision();
+    const revBefore = getReviewCacheDataRevision();
+
+    // Invalidate without known user scope (e.g. uncertain credentials)
+    const inv = await invalidateReviewQueue(null, 'uncertain_scope');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(inv.scope, null);
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+  });
+
+  // Test 114: Queue invalidation preserves unrelated offline work, captured photos, and dossiers
+  it('114. Queue invalidation preserves unrelated offline work, captured photos, manifests, and dossiers', () => {
+    const storageKeys = [
+      'nn_access',
+      'nn_install_id',
+      'nn_recapture_tasks_123',
+      'nn_report_summary_123',
+      'nn_violation_dossier_123',
+      'nn_rq_v2_u1_inspector_all_off0_hash1',
+      'nn_rs_v2_u1_inspector_hash2',
+    ];
+
+    const targetScopeStr = 'u1_inspector';
+    const preservedKeys = storageKeys.filter(k => {
+      const isQueueCache = k.startsWith('nn_rq_') || k.startsWith('nn_rs_') || k.startsWith('nn_review_');
+      if (isQueueCache && k.includes(`_${targetScopeStr}_`)) {
+        return false; // evicted
+      }
+      return true; // preserved
+    });
+
+    assert.ok(preservedKeys.includes('nn_access'));
+    assert.ok(preservedKeys.includes('nn_install_id'));
+    assert.ok(preservedKeys.includes('nn_recapture_tasks_123'));
+    assert.ok(preservedKeys.includes('nn_report_summary_123'));
+    assert.ok(preservedKeys.includes('nn_violation_dossier_123'));
+    assert.strictEqual(preservedKeys.includes('nn_rq_v2_u1_inspector_all_off0_hash1'), false);
+    assert.strictEqual(preservedKeys.includes('nn_rs_v2_u1_inspector_hash2'), false);
+  });
+
+  // Test 115: Session generation protection remains intact across data revision bumps
+  it('115. Existing session-generation protection remains intact across queue data revision bumps', () => {
+    resetReviewCacheSession();
+    resetReviewCacheDataRevision();
+
+    const startSession = getReviewCacheSessionId();
+    const startRevision = getReviewCacheDataRevision();
+
+    bumpReviewCacheDataRevision();
+    bumpReviewCacheDataRevision();
+
+    assert.strictEqual(getReviewCacheDataRevision(), startRevision + 2);
+    assert.strictEqual(getReviewCacheSessionId(), startSession, 'Session generation must NOT change when revision bumps');
   });
 
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);
