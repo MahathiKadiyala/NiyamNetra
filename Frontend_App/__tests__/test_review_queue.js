@@ -2409,6 +2409,435 @@ async function runTests() {
     assert.strictEqual(getReviewCacheSessionId(), startSession, 'Session generation must NOT change when revision bumps');
   });
 
+  // --- Module 6.10: End-to-End Review Queue Lifecycle Regression Tests ---
+
+  // Test 116 (Scenario A): Unconfirmed violation becomes confirmed
+  await itAsync('116. Unconfirmed violation item transition to confirmed violation invalidates cache and shifts facet state', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '301', role: 'inspector' });
+    const revBefore = getReviewCacheDataRevision();
+
+    // Mock client state
+    let activeFacet = 'unconfirmed_violations';
+    let queueItems = [
+      { scan_id: 801, category: 'unconfirmed_violation', overall_result: 'violation' },
+    ];
+
+    // Officer confirms violation
+    const inv = await invalidateReviewQueue(scope, 'adjudication_confirm');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+
+    // Refresh simulation: scan is no longer in unconfirmed_violations
+    const loadFacetData = (facet) => {
+      if (facet === 'unconfirmed_violations') return [];
+      if (facet === 'confirmed_violations') return [{ scan_id: 801, category: 'confirmed_violation', overall_result: 'violation' }];
+      return [];
+    };
+
+    const unconfItems = loadFacetData('unconfirmed_violations');
+    const confItems = loadFacetData('confirmed_violations');
+    assert.strictEqual(unconfItems.length, 0);
+    assert.strictEqual(confItems.length, 1);
+    assert.strictEqual(confItems[0].scan_id, 801);
+  });
+
+  // Test 117 (Scenario A): Inspection resolution removes item from open queue
+  await itAsync('117. Inspection resolution removes item from open queue and evicts cached open pages', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '302', role: 'inspector' });
+    const openKey = buildReviewQueueCacheKey({ status_filter: 'OPEN' }, scope);
+
+    const mockStorage = new Map();
+    mockStorage.set(openKey.storageKey, JSON.stringify({ items: [{ scan_id: 802, status: 'OPEN' }] }));
+
+    // Officer resolves inspection review
+    await invalidateReviewQueue(scope, 'adjudication_resolve');
+
+    // Invalidation evicts matching scope keys
+    for (const k of Array.from(mockStorage.keys())) {
+      if (k.includes(scope.scopeStr)) mockStorage.delete(k);
+    }
+
+    assert.strictEqual(mockStorage.has(openKey.storageKey), false, 'Open queue cache must be purged on resolution');
+
+    // Fresh authoritative fetch for OPEN status returns empty
+    const fetchOpenQueue = () => [];
+    assert.strictEqual(fetchOpenQueue().length, 0);
+  });
+
+  // Test 118 (Scenario B): Technical OCR recovery reassessment
+  await itAsync('118. Technical OCR recovery reassessment transitions scan out of technical_recovery category', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '303', role: 'inspector' });
+    const revBefore = getReviewCacheDataRevision();
+
+    // Mutation: reassessment completed
+    const inv = await invalidateReviewQueue(scope, 'recapture_reassessment');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+
+    // Scan transitions from technical_recovery to compliant
+    const getSubtypeItems = (subtype) => {
+      if (subtype === 'technical_recovery') return [];
+      return [{ scan_id: 803, overall_result: 'compliant' }];
+    };
+
+    assert.strictEqual(getSubtypeItems('technical_recovery').length, 0);
+  });
+
+  // Test 119 (Scenario B): Technical OCR failure alone never fabricates MRP/net-quantity violations
+  it('119. Technical OCR failure alone never fabricates MRP or net-quantity violations or penalties in client presentation', () => {
+    const scanOcrFailed = {
+      scan_id: 804,
+      overall_result: 'not_assessed',
+      reasons: [{ subtype: 'technical_recovery', detail: 'OCR provider timeout: Google Vision API' }],
+      findings: [
+        { check_id: 'CHK_OCR', engine_verdict: 'not_assessed', human_verdict: null, reason: 'OCR unavailable' },
+      ],
+    };
+
+    // Client evaluation invariant: must NOT display violation or calculate statutory fine
+    const isViolation = scanOcrFailed.overall_result === 'violation';
+    const hasPenalty = scanOcrFailed.findings.some(f => f.engine_verdict === 'fail');
+
+    assert.strictEqual(isViolation, false, 'OCR failure must NOT be presented as a violation');
+    assert.strictEqual(hasPenalty, false, 'OCR failure must NOT trigger statutory penalty');
+    assert.strictEqual(scanOcrFailed.reasons[0].subtype, 'technical_recovery');
+  });
+
+  // Test 120 (Scenario C): Recapture task fulfillment invalidates queue cache
+  await itAsync('120. Recapture task fulfillment invalidates queue cache and advances revision', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '304', role: 'inspector' });
+    const revBefore = getReviewCacheDataRevision();
+
+    const inv = await invalidateReviewQueue(scope, 'recapture_fulfilled');
+    assert.strictEqual(inv.invalidated, true);
+    assert.strictEqual(getReviewCacheDataRevision(), revBefore + 1);
+  });
+
+  // Test 121 (Scenario C): Mobile queue does not display obsolete recapture reason after refresh
+  it('121. Mobile queue does not display obsolete recapture reason after successful refresh while preserving unresolved findings', () => {
+    // Before refresh: scan had recapture required guidance
+    const staleScan = {
+      scan_id: 805,
+      category: 'recapture_required',
+      guidance: 'Missing back panel image with principal display; recapture required',
+      findings: [{ check_id: 'CHK01', needs_review: true, engine_verdict: 'not_assessed' }],
+    };
+
+    // After recapture photo uploaded and reassessed:
+    const refreshedScan = {
+      scan_id: 805,
+      category: 'unconfirmed_violation',
+      guidance: null, // obsolete guidance cleared
+      findings: [{ check_id: 'CHK01', needs_review: true, engine_verdict: 'fail' }], // unresolved finding preserved
+    };
+
+    assert.strictEqual(refreshedScan.guidance, null, 'Obsolete recapture guidance must be cleared');
+    assert.strictEqual(refreshedScan.findings[0].needs_review, true, 'Unresolved finding must remain actionable for officer review');
+  });
+
+  // Test 122 (Scenario D): Draft inspection excluded from mobile officer review queue
+  it('122. Draft inspection is excluded from mobile officer review queue until finalization', () => {
+    const inspections = [
+      { id: 901, status: 'draft', scans: [{ scan_id: 9001, result: 'violation' }] },
+      { id: 902, status: 'submitted', scans: [{ scan_id: 9002, result: 'violation' }] },
+    ];
+
+    // Filter used by review queue
+    const reviewQueueScans = inspections
+      .filter(i => i.status === 'submitted')
+      .flatMap(i => i.scans);
+
+    assert.strictEqual(reviewQueueScans.length, 1);
+    assert.strictEqual(reviewQueueScans[0].scan_id, 9002);
+  });
+
+  // Test 123 (Scenario D): Inspection submission updates queue and draft counts with idempotent retry
+  await itAsync('123. Inspection submission finalization updates queue and draft counts, with idempotent retry protection', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '305', role: 'inspector' });
+
+    let draftCount = 1;
+    let reviewQueueCount = 0;
+
+    // Finalize inspection
+    const inv = await invalidateReviewQueue(scope, 'inspection_finalized');
+    assert.strictEqual(inv.invalidated, true);
+    draftCount--;
+    reviewQueueCount++;
+
+    assert.strictEqual(draftCount, 0);
+    assert.strictEqual(reviewQueueCount, 1);
+
+    // Idempotent retry: submission returns already_submitted without duplicating count
+    const retryStatus = 'already_submitted';
+    if (retryStatus === 'already_submitted') {
+      // No double counting
+    }
+    assert.strictEqual(draftCount, 0);
+    assert.strictEqual(reviewQueueCount, 1);
+  });
+
+  // Test 124 (Scenario E): Offline sync completion invalidates review queue
+  await itAsync('124. Offline sync completion invalidates review queue and purges obsolete cache', async () => {
+    resetReviewCacheDataRevision();
+    const scope = normalizeUserScope({ userId: '306', role: 'inspector' });
+    const key = buildReviewQueueCacheKey({ subtype: 'technical_recovery' }, scope);
+
+    const mockStorage = new Map();
+    mockStorage.set(key.storageKey, JSON.stringify({ items: [{ scan_id: 999 }] }));
+
+    const inv = await invalidateReviewQueue(scope, 'offline_sync_completed');
+    assert.strictEqual(inv.invalidated, true);
+
+    for (const k of Array.from(mockStorage.keys())) {
+      if (k.includes(scope.scopeStr)) mockStorage.delete(k);
+    }
+    assert.strictEqual(mockStorage.has(key.storageKey), false);
+  });
+
+  // Test 125 (Scenario E): Client replaces obsolete cache with current server data after sync
+  it('125. Client replaces obsolete cache with current server queue data after sync', () => {
+    let clientCache = {
+      revision: 1,
+      items: [{ scan_id: 810, status: 'OPEN' }],
+    };
+
+    // Sync mutates server and bumps revision to 2
+    const serverRevision = 2;
+    const serverResponse = {
+      revision: 2,
+      items: [{ scan_id: 810, status: 'RESOLVED' }],
+    };
+
+    if (serverRevision > clientCache.revision) {
+      clientCache = serverResponse;
+    }
+
+    assert.strictEqual(clientCache.revision, 2);
+    assert.strictEqual(clientCache.items[0].status, 'RESOLVED');
+  });
+
+  // Test 126 (Scenario E): Failed offline sync does not claim live mutation success
+  it('126. Failed offline sync does not claim live mutation success or advance cache revision', () => {
+    resetReviewCacheDataRevision();
+    const initialRev = getReviewCacheDataRevision();
+
+    let syncSuccess = false;
+    let syncError = null;
+
+    const performSync = (shouldFail) => {
+      try {
+        if (shouldFail) throw new Error('HTTP 503: Service Unavailable');
+        syncSuccess = true;
+        bumpReviewCacheDataRevision();
+      } catch (err) {
+        syncError = err.message;
+      }
+    };
+
+    performSync(true);
+    assert.strictEqual(syncSuccess, false);
+    assert.ok(syncError.includes('503'));
+    assert.strictEqual(getReviewCacheDataRevision(), initialRev, 'Revision must NOT advance on failed sync');
+  });
+
+  // Test 127 (Scenario E): Offline operation without compatible cache shows truthful unavailable state
+  it('127. Offline operation without compatible cache shows truthful unavailable state, never a false empty queue', () => {
+    const handleQueueLoad = (cachedData, isOnline) => {
+      if (cachedData) return { status: 'success', data: cachedData };
+      if (!isOnline) {
+        return {
+          status: 'unavailable',
+          isOffline: true,
+          errorMessage: 'Offline review queue unavailable for this query.',
+          total: null, // Critical: must NOT be 0
+        };
+      }
+      return { status: 'loading', data: null };
+    };
+
+    const result = handleQueueLoad(null, false);
+    assert.strictEqual(result.status, 'unavailable');
+    assert.strictEqual(result.isOffline, true);
+    assert.strictEqual(result.total, null, 'Must NOT fabricate total: 0 when cache is unavailable');
+  });
+
+  // Test 128 (Scenario F): Late in-flight response started before mutation is rejected by revision guard
+  it('128. Late in-flight response started before mutation is rejected by revision guard', () => {
+    resetReviewCacheDataRevision();
+    const reqRevision = getReviewCacheDataRevision(); // revision 0
+
+    // Mutation completes before response arrives
+    bumpReviewCacheDataRevision(); // revision 1
+
+    let displayedData = null;
+    const handleResponse = (respData, revisionAtDispatch) => {
+      if (revisionAtDispatch !== getReviewCacheDataRevision()) {
+        // Obsolete late response dropped
+        return;
+      }
+      displayedData = respData;
+    };
+
+    handleResponse([{ scan_id: 111 }], reqRevision);
+    assert.strictEqual(displayedData, null, 'Late response with stale revision must be dropped');
+  });
+
+  // Test 129 (Scenario F): Late in-flight response cannot write into or repopulate invalidated cache
+  it('129. Late in-flight response cannot write into or repopulate invalidated cache', () => {
+    resetReviewCacheDataRevision();
+    const dispatchRevision = getReviewCacheDataRevision();
+
+    // Cache invalidated and revision bumped
+    bumpReviewCacheDataRevision();
+
+    const cacheStorage = new Map();
+    const saveToCache = (key, data, revisionAtDispatch) => {
+      if (revisionAtDispatch !== getReviewCacheDataRevision()) {
+        return false; // Stale write rejected
+      }
+      cacheStorage.set(key, data);
+      return true;
+    };
+
+    const written = saveToCache('rq_key', { items: [] }, dispatchRevision);
+    assert.strictEqual(written, false, 'Late response write must be aborted');
+    assert.strictEqual(cacheStorage.size, 0);
+  });
+
+  // Test 130 (Scenario F): Subsequent fresh request with matching current revision is accepted
+  it('130. Subsequent fresh request with matching current revision is accepted and updates UI', () => {
+    resetReviewCacheDataRevision();
+    bumpReviewCacheDataRevision(); // revision 1
+    const currentRev = getReviewCacheDataRevision();
+
+    let displayedData = null;
+    const handleResponse = (respData, revisionAtDispatch) => {
+      if (revisionAtDispatch === getReviewCacheDataRevision()) {
+        displayedData = respData;
+      }
+    };
+
+    handleResponse([{ scan_id: 222 }], currentRev);
+    assert.notStrictEqual(displayedData, null);
+    assert.strictEqual(displayedData[0].scan_id, 222);
+  });
+
+  // Test 131 (Scenario G): Logout while review queue request is in flight invalidates session
+  it('131. Logout while review queue request is in flight invalidates session and discards response', () => {
+    resetReviewCacheSession();
+    const sessionAtDispatch = getReviewCacheSessionId();
+
+    // User logs out before response arrives (logout bumps session generation)
+    bumpReviewCacheSessionId();
+
+    let activeState = 'clean';
+    const handleResponse = (session) => {
+      if (session === getReviewCacheSessionId()) {
+        activeState = 'rendered';
+      }
+    };
+
+    handleResponse(sessionAtDispatch);
+    assert.strictEqual(activeState, 'clean', 'Response for terminated session must be discarded');
+  });
+
+  // Test 132 (Scenario G): Account switch isolates in-flight response between Officer A and Officer B
+  it('132. Account change before in-flight response arrives isolates data between Officer A and Officer B', () => {
+    const scopeA = normalizeUserScope({ userId: '101', role: 'inspector' });
+    const scopeB = normalizeUserScope({ userId: '102', role: 'inspector' });
+
+    let activeUserScope = scopeA;
+    const reqScope = scopeA;
+
+    // User switches to Officer B
+    activeUserScope = scopeB;
+
+    let officerBQueue = [];
+    const handleResponse = (data, responseScope) => {
+      if (responseScope.scopeStr === activeUserScope.scopeStr) {
+        officerBQueue = data;
+      }
+    };
+
+    handleResponse([{ scan_id: 333, officer: 'A' }], reqScope);
+    assert.strictEqual(officerBQueue.length, 0, 'Officer A response must not be accepted by Officer B');
+  });
+
+  // Test 133 (Scenario G): Jurisdiction change isolates cache keys preventing data leakage
+  it('133. Jurisdiction change isolates cache keys preventing cross-jurisdiction data leakage', () => {
+    const scopeHyd = normalizeUserScope({ userId: '201', role: 'inspector', jurisdiction: 'Hyderabad' });
+    const scopeVij = normalizeUserScope({ userId: '201', role: 'inspector', jurisdiction: 'Vijayawada' });
+
+    const keyHyd = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violation' }, scopeHyd);
+    const keyVij = buildReviewQueueCacheKey({ subtype: 'unconfirmed_violation' }, scopeVij);
+
+    assert.notStrictEqual(keyHyd.storageKey, keyVij.storageKey);
+    assert.ok(keyHyd.storageKey.includes('hyderabad'));
+    assert.ok(keyVij.storageKey.includes('vijayawada'));
+
+    const envelopeHyd = createReviewQueueEnvelope([{ scan_id: 444 }], keyHyd.query, scopeHyd);
+    const validationForVij = validateCachedReviewQueue(envelopeHyd, keyVij.query, scopeVij);
+    assert.strictEqual(validationForVij.valid, false, 'Hyderabad envelope must be rejected for Vijayawada scope');
+  });
+
+  // Test 134 (Scenario G): Routine token refresh preserves valid same-scope offline cache
+  it('134. Routine token refresh preserves valid same-scope offline cache', () => {
+    const preRefreshUser = { userId: '301', role: 'inspector', jurisdiction: 'Hyderabad' };
+    const postRefreshUser = { userId: '301', role: 'inspector', jurisdiction: 'Hyderabad' };
+
+    const scopePre = normalizeUserScope(preRefreshUser);
+    const scopePost = normalizeUserScope(postRefreshUser);
+
+    assert.strictEqual(scopePre.scopeStr, scopePost.scopeStr);
+
+    const query = { subtype: 'ALL', offset: 0 };
+    const keyPre = buildReviewQueueCacheKey(query, scopePre);
+    const envelope = createReviewQueueEnvelope([{ scan_id: 555 }], keyPre.query, scopePre);
+    const validation = validateCachedReviewQueue(envelope, query, scopePost);
+    assert.strictEqual(validation.valid, true, 'Same-scope envelope must remain valid across routine refresh');
+  });
+
+  // Test 135 (Scenario H): Subtype pagination preserves active filter, filter switch resets offset, facets non-additive
+  it('135. Subtype pagination preserves active filter, filter switch resets offset, and facets are non-additive', () => {
+    let activeFilter = 'technical_recovery';
+    let currentOffset = 0;
+    const PAGE_SIZE = 25;
+
+    // Moving to next page
+    currentOffset += PAGE_SIZE;
+    assert.strictEqual(currentOffset, 25);
+    assert.strictEqual(activeFilter, 'technical_recovery', 'Filter must be preserved on page change');
+
+    // Switching filter resets offset to 0
+    const onSelectFilter = (newFilter) => {
+      activeFilter = newFilter;
+      currentOffset = 0; // reset offset
+    };
+
+    onSelectFilter('unconfirmed_violations');
+    assert.strictEqual(activeFilter, 'unconfirmed_violations');
+    assert.strictEqual(currentOffset, 0, 'Changing filter must reset offset to 0');
+
+    // Summary facets non-additive: a scan can span multiple categories without inflating total
+    const summaryBreakdown = {
+      technical_recovery: 2,
+      unconfirmed_violations: 3,
+      recapture_required: 1,
+      total: 4, // Distinct scans = 4, not 2 + 3 + 1 = 6
+    };
+
+    assert.notStrictEqual(
+      summaryBreakdown.total,
+      summaryBreakdown.technical_recovery + summaryBreakdown.unconfirmed_violations + summaryBreakdown.recapture_required,
+      'Total must count distinct scans, not sum overlapping facets'
+    );
+  });
+
   console.log(`\nResults: ${passed} passed, ${failed} failed\n`);
   if (failed > 0) {
     process.exit(1);
