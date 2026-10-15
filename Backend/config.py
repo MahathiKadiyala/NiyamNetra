@@ -168,7 +168,7 @@ class Settings(BaseSettings):
                                            # for letter-height checks) and supports
                                            # non-Latin langs; 2 is Latin-only, no overlay.
     OCR_SPACE_LANGUAGE: str = "eng"        # OCR.space code, e.g. "eng" or "hin".
-    OCR_SPACE_TIMEOUT_S: float = 25.0
+    OCR_SPACE_TIMEOUT_S: float = 12.0
     # Best-accuracy cloud OCR: Google Cloud Vision DOCUMENT_TEXT_DETECTION.
     # Needs only httpx (already in requirements-render.txt), ~0MB RAM.
     # Get key: console.cloud.google.com → enable Vision API → create API key.
@@ -176,7 +176,7 @@ class Settings(BaseSettings):
     # Leave blank to use OCR.space only. See .env.example.
     GOOGLE_VISION_API_KEY: str | None = None
     GOOGLE_VISION_URL: str = "https://vision.googleapis.com/v1/images:annotate"
-    GOOGLE_VISION_TIMEOUT_S: float = 25.0
+    GOOGLE_VISION_TIMEOUT_S: float = 10.0
 
     # Free Generative AI Vision OCR: Google Gemini Flash (Google AI Studio).
     # 100% FREE, NO credit card or billing required (aistudio.google.com/app/apikey).
@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     # Azure AI Vision OCR (Read API v4.0 / Analyze features=read)
     AZURE_VISION_KEY: str | None = None
     AZURE_VISION_ENDPOINT: str | None = None
-    AZURE_VISION_TIMEOUT_S: float = 15.0
+    AZURE_VISION_TIMEOUT_S: float = 10.0
 
     # --- Phase 3: Cloud LLM Structured Declaration Extraction ---
     LLM_PROVIDER: str = "groq"              # groq | gemini | auto

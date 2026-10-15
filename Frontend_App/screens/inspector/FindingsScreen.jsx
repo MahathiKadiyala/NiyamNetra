@@ -428,6 +428,16 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   // Auto-sync fresh findings and scan details from server on mount
   useEffect(() => {
     if (!scanId) return;
+    // Skip redundant network request if fresh assessed findings were already provided
+    if (
+      scan?.findings &&
+      Array.isArray(scan.findings) &&
+      scan.findings.length > 0 &&
+      scan?.overall_result &&
+      scan.overall_result !== 'not_assessed'
+    ) {
+      return;
+    }
     let active = true;
     (async () => {
       try {

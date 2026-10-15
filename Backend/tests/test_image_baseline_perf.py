@@ -273,3 +273,73 @@ def test_baseline_assessment_benchmarks(test_env):
           f"OCR={latest_assess['ocr_ms']:.2f}ms, "
           f"Rules={latest_assess['rules_ms']:.2f}ms)")
 
+
+def test_baseline_reassessment_cache_reuse_latency(test_env):
+    """Benchmark the idempotency cache reuse path for unchanged evidence."""
+    client, db, inspector, store = test_env
+    r_insp = client.post("/inspections", json={"store_id": store.id, "transaction_type": "retail_sale"})
+    insp_id = r_insp.json()["id"]
+
+    r_scan = client.post(
+        f"/inspections/{insp_id}/scans",
+        json={
+            "commodity_generic": "Basmati Rice",
+            "brand_name": "Royal Feast",
+            "batch_number": "B-02",
+            "geometry": {
+                "panel_shape": "rectangular",
+                "panel_height_mm": 120.0,
+                "panel_width_mm": 80.0,
+                "scale_source": "declared",
+            },
+        },
+    )
+    scan_id = r_scan.json()["id"]
+
+    # Upload sharp front panel image
+    img_bytes = _create_synthetic_label_image(1600, 1200)
+    r_up = client.post(
+        f"/scans/{scan_id}/images",
+        data={"panel": "front"},
+        files={"file": ("front.jpg", img_bytes, "image/jpeg")},
+    )
+    assert r_up.status_code == 201
+
+    from unittest.mock import patch
+    from ocr.base import OcrLine, OcrResult, STATUS_SUCCESS
+
+    mock_res = OcrResult(
+        lines=[
+            OcrLine(text="ROYAL FEAST BASMATI RICE", confidence=0.98, box=[[10.0, 10.0], [300.0, 10.0], [300.0, 40.0], [10.0, 40.0]]),
+            OcrLine(text="NET QTY: 1 kg", confidence=0.99, box=[[10.0, 50.0], [200.0, 50.0], [200.0, 80.0], [10.0, 80.0]]),
+            OcrLine(text="MRP Rs. 120.00 (INCL. OF ALL TAXES)", confidence=0.97, box=[[10.0, 90.0], [400.0, 90.0], [400.0, 120.0], [10.0, 120.0]]),
+            OcrLine(text="MFG DATE: 01/2026 BATCH NO: B-2026-X", confidence=0.95, box=[[10.0, 130.0], [450.0, 130.0], [450.0, 160.0], [10.0, 160.0]]),
+            OcrLine(text="MFR: ROYAL FOODS PVT LTD HYDERABAD", confidence=0.96, box=[[10.0, 170.0], [500.0, 170.0], [500.0, 200.0], [10.0, 200.0]]),
+            OcrLine(text="CONSUMER CARE: 1800-111-2222 care@royal.test", confidence=0.95, box=[[10.0, 210.0], [520.0, 210.0], [520.0, 240.0], [10.0, 240.0]]),
+            OcrLine(text="COUNTRY OF ORIGIN: INDIA", confidence=0.98, box=[[10.0, 250.0], [350.0, 250.0], [350.0, 280.0], [10.0, 280.0]]),
+        ],
+        engine="google_vision",
+        provider="google_vision",
+        status=STATUS_SUCCESS,
+        mean_confidence=0.97,
+    )
+
+    with patch("ocr_engine.run_ocr", return_value=mock_res):
+        # First assess (initial fresh evaluation)
+        t0_fresh = time.perf_counter()
+        r_fresh = client.post(f"/scans/{scan_id}/assess")
+        fresh_ms = (time.perf_counter() - t0_fresh) * 1000
+        assert r_fresh.status_code == 200
+
+        # Second assess (cache hit / idempotency fast path)
+        t0_cached = time.perf_counter()
+        r_cached = client.post(f"/scans/{scan_id}/assess")
+        cached_ms = (time.perf_counter() - t0_cached) * 1000
+        assert r_cached.status_code == 200
+        assert r_cached.json()["overall_result"] == r_fresh.json()["overall_result"]
+
+        print(f"\n[BENCHMARK RESULT] Fresh assess={fresh_ms:.2f}ms vs Cached assess={cached_ms:.2f}ms (Speedup: {fresh_ms / max(cached_ms, 0.01):.1f}x)")
+        print("FRESH DIAG:", r_fresh.json().get("diagnostics"), "RESULT:", r_fresh.json().get("overall_result"))
+        print("CACHED DIAG:", r_cached.json().get("diagnostics"), "RESULT:", r_cached.json().get("overall_result"))
+        assert cached_ms < fresh_ms
+

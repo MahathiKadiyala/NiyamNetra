@@ -1068,10 +1068,10 @@ def submit_inspection(body: SubmitInspectionRequest,
             set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(img_set_parts)).encode()).hexdigest()
 
             is_identical = False
-            if bool(existing_findings) and getattr(s, "ocr_cache_hash", None) is not None:
+            if bool(existing_findings) and (s.overall_result != "not_assessed" or getattr(s, "ocr_cache_hash", None) is not None):
                 if cached_fp is not None:
                     is_identical = (cached_fp == curr_fingerprint)
-                else:
+                elif getattr(s, "ocr_cache_hash", None) is not None:
                     rp = getattr(s, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
                     is_identical = (
                         getattr(s, "ocr_cache_hash", None) == set_hash

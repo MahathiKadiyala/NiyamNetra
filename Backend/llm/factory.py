@@ -107,13 +107,32 @@ def structure_inspection_ocr(
 
     # 4. Check cache if enabled
     cache_enabled = use_cache and getattr(settings, "LLM_CACHE_ENABLED", True)
-    if cache_enabled and cache_hash in _LLM_MEMORY_CACHE:
-        logger.debug("[LLM Cache] In-memory cache hit for hash %s", cache_hash[:12])
-        hit = _LLM_MEMORY_CACHE[cache_hash]
-        # Return a copy with fresh metadata flag
-        res = StructuredDeclarationResult.from_dict(hit.to_dict())
-        res.metadata["cache_hit"] = True
-        return res
+    if cache_enabled:
+        if cache_hash in _LLM_MEMORY_CACHE:
+            logger.debug("[LLM Cache] In-memory cache hit for hash %s", cache_hash[:12])
+            hit = _LLM_MEMORY_CACHE[cache_hash]
+            # Return a copy with fresh metadata flag
+            res = StructuredDeclarationResult.from_dict(hit.to_dict())
+            res.metadata["cache_hit"] = True
+            return res
+
+        # Rehydrate from persisted evidence if available in evidence_meta and fingerprint matches
+        persisted_data = (evidence_meta or {}).get("persisted_llm_structured_data")
+        persisted_hash = (evidence_meta or {}).get("persisted_llm_cache_hash")
+        if persisted_data and persisted_hash and persisted_hash == cache_hash:
+            try:
+                import json as _json
+                data_dict = _json.loads(persisted_data) if isinstance(persisted_data, str) else persisted_data
+                res = StructuredDeclarationResult.from_dict(data_dict)
+                res.metadata["cache_hit"] = True
+                res.metadata["persisted_rehydrated"] = True
+                if len(_LLM_MEMORY_CACHE) >= _MAX_CACHE_ITEMS:
+                    _LLM_MEMORY_CACHE.pop(next(iter(_LLM_MEMORY_CACHE)))
+                _LLM_MEMORY_CACHE[cache_hash] = res
+                logger.info("[LLM Cache] Persisted evidence cache hit for hash %s", cache_hash[:12])
+                return res
+            except Exception as e:
+                logger.warning("[LLM Cache] Failed to rehydrate persisted structured data: %s", e)
 
     # 5. Execute primary provider call
     logger.info("[LLM Structuring] Calling primary provider: %s (model: %s)", primary.name, primary.model_name)

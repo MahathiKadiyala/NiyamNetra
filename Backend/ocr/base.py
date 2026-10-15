@@ -112,8 +112,8 @@ class BaseOCRProvider(ABC):
     def _execute_with_retry(
         self,
         func,
-        max_retries: int = 2,
-        initial_backoff_s: float = 0.5,
+        max_retries: int = 1,
+        initial_backoff_s: float = 0.3,
     ) -> Any:
         """Bounded retry policy for transient network/rate errors (Section 16)."""
         retries = 0
@@ -129,7 +129,11 @@ class BaseOCRProvider(ABC):
 
                 if status_code in (429, 502, 503, 504):
                     is_transient = True
-                elif "timeout" in err_str or "connection" in err_str:
+                elif "timeout" in err_str:
+                    # Timeout should fail fast so candidate fallback chain can activate
+                    # without compounding multi-tens-of-seconds blocking delays.
+                    is_transient = False
+                elif "connection" in err_str:
                     is_transient = True
 
                 if is_transient and retries < max_retries:

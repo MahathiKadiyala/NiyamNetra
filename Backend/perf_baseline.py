@@ -104,14 +104,16 @@ def record_assess_timing(timings: dict[str, Any]) -> None:
         _LATEST_ASSESS_BENCHMARKS.pop(0)
     logger.info(
         "[ASSESS_BENCH] scan=%s total=%.2fms load_disk=%.2fms quad=%.2fms "
-        "rectify=%.2fms ocr=%.2fms rules=%.2fms",
+        "rectify=%.2fms ocr=%.2fms llm=%.2fms rules=%.2fms db=%.2fms",
         timings.get("scan_id"),
         timings.get("total_ms", 0.0),
         timings.get("load_disk_ms", 0.0),
         timings.get("quad_ms", 0.0),
         timings.get("rectify_ms", 0.0),
         timings.get("ocr_ms", 0.0),
+        timings.get("llm_ms", 0.0),
         timings.get("rules_ms", 0.0),
+        timings.get("db_persist_ms", 0.0),
     )
 
 

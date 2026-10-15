@@ -266,7 +266,7 @@ async def upload_image(
     t_store_end = time.perf_counter()
 
     t_decode_start = time.perf_counter()
-    bgr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    bgr = _probe if _probe is not None else cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     if bgr is None:
         # Pre-validation passed but decode now fails; remove orphan if created.
         try:
@@ -489,10 +489,10 @@ def assess_scan(
         _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         is_identical = False
-        if bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) is not None:
+        if bool(_existing_findings) and (scan.overall_result != "not_assessed" or getattr(scan, "ocr_cache_hash", None) is not None):
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
-            else:
+            elif getattr(scan, "ocr_cache_hash", None) is not None:
                 rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
                 is_identical = (
                     getattr(scan, "ocr_cache_hash", None) == _set_hash
@@ -536,10 +536,10 @@ def assess_scan(
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
         is_identical = False
-        if bool(_existing_findings) and getattr(scan, "ocr_cache_hash", None) is not None:
+        if bool(_existing_findings) and (scan.overall_result != "not_assessed" or getattr(scan, "ocr_cache_hash", None) is not None):
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
-            else:
+            elif getattr(scan, "ocr_cache_hash", None) is not None:
                 rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
                 is_identical = (
                     getattr(scan, "ocr_cache_hash", None) == _set_hash
@@ -719,6 +719,7 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fing
 
     _ASSESSMENT_FINGERPRINTS[scan.id] = fingerprint
 
+    t_db_start = time.perf_counter()
     try:
         db.commit()
     except IntegrityError as exc:
@@ -727,6 +728,7 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fing
         _logging.getLogger("niyamnetra.assess").error("Assessment commit IntegrityError: %s", exc)
         raise HTTPException(status.HTTP_409_CONFLICT,
                             detail="Assessment conflicts with existing data; retry")
+    t_db_dur = round((time.perf_counter() - t_db_start) * 1000, 2)
 
     t_assess_end = time.perf_counter()
     from perf_baseline import pop_context_timing
@@ -738,7 +740,9 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fing
         "quad_ms": ctx_timings.get("quad_ms", 0.0),
         "rectify_ms": ctx_timings.get("rectify_ms", 0.0),
         "ocr_ms": ctx_timings.get("ocr_ms", 0.0),
+        "llm_ms": ctx_timings.get("llm_ms", 0.0),
         "rules_ms": round((t_rules_end - t_rules_start) * 1000, 2),
+        "db_persist_ms": t_db_dur,
     })
     append_audit(db, inspection_id=scan.inspection_id, scan_id=scan.id,
                  user_id=user.id, action="assessed", new_value=verdict.overall_result)
@@ -1300,44 +1304,47 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
     t_quad_end = t_quad_start
     t_rectify_start = t_quad_start
     t_rectify_end = t_quad_start
-    try:
-        from image_processor import detect_candidate_quad, safe_rectify
-        _quad, _geom_meta = detect_candidate_quad(bgr)
-        t_quad_end = time.perf_counter()
-        if _quad is not None:
-            t_rectify_start = time.perf_counter()
-            _rect, _tilt, _rect_meta = safe_rectify(bgr, _quad)
-            t_rectify_end = time.perf_counter()
-            if _rect_meta.get("rectification_status") == "applied" and getattr(_rect, "shape", (0,))[0] > 0:
-                _measure = _rect
-                front.rectified = True
-                front.residual_tilt_deg = _tilt
-                try:
-                    from image_processor import prepare_derived_rectified_artifact
-                    r_path, r_w, r_h = prepare_derived_rectified_artifact(Path(front.file_path), _rect)
-                    front.rectified_file_path = str(r_path)
-                except Exception:
-                    pass
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
+    _has_existing_rect = (
+        getattr(front, "rectified", False)
+        and getattr(front, "rectified_file_path", None)
+        and Path(front.rectified_file_path).exists()
+    )
+    if _has_existing_rect:
+        _rect_cached = cv2.imread(front.rectified_file_path)
+        if _rect_cached is not None and getattr(_rect_cached, "shape", (0,))[0] > 0:
+            _measure = _rect_cached
+            t_quad_end = time.perf_counter()
+            t_rectify_end = t_quad_end
+        else:
+            _has_existing_rect = False
+
+    if not _has_existing_rect:
+        try:
+            from image_processor import detect_candidate_quad, safe_rectify
+            _quad, _geom_meta = detect_candidate_quad(bgr)
+            t_quad_end = time.perf_counter()
+            if _quad is not None:
+                t_rectify_start = time.perf_counter()
+                _rect, _tilt, _rect_meta = safe_rectify(bgr, _quad)
+                t_rectify_end = time.perf_counter()
+                if _rect_meta.get("rectification_status") == "applied" and getattr(_rect, "shape", (0,))[0] > 0:
+                    _measure = _rect
+                    front.rectified = True
+                    front.residual_tilt_deg = _tilt
+                    try:
+                        from image_processor import prepare_derived_rectified_artifact
+                        r_path, r_w, r_h = prepare_derived_rectified_artifact(Path(front.file_path), _rect)
+                        front.rectified_file_path = str(r_path)
+                    except Exception:
+                        pass
+                else:
+                    front.rectified = False
+                    front.residual_tilt_deg = _tilt if _tilt is not None else None
             else:
                 front.rectified = False
-                front.residual_tilt_deg = _tilt if _tilt is not None else None
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-        else:
-            front.rectified = False
-            front.residual_tilt_deg = None
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
-    except Exception:
-        _measure = bgr
+                front.residual_tilt_deg = None
+        except Exception:
+            _measure = bgr
 
     shape = getattr(_measure, "shape", None)
     if shape is None or len(shape) < 1:
@@ -1616,9 +1623,15 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
     _llm_res = None
     try:
         _input_panels = _ocr_results if _ocr_results else [ocr]
+        _evidence_meta = {
+            "scan_id": scan.id,
+            "inspection_id": scan.inspection_id,
+            "persisted_llm_structured_data": getattr(scan, "llm_structured_data", None),
+            "persisted_llm_cache_hash": getattr(scan, "llm_cache_hash", None),
+        }
         _llm_res = structure_inspection_ocr(
             _input_panels,
-            evidence_meta={"scan_id": scan.id, "inspection_id": scan.inspection_id},
+            evidence_meta=_evidence_meta,
         )
         ctx.llm_result = _llm_res
         _llm_dur = (time.perf_counter() - _llm_t0) * 1000
@@ -1656,6 +1669,13 @@ def build_context(db: Session, scan: Scan, inspection: Inspection):
             _llm_prov, _llm_mod, scan.inspection_id, scan.id, _llm_dur, str(_llm_err)[:200]
         )
         ctx.fields = extract_fields(ocr)
+
+    try:
+        from perf_baseline import _CONTEXT_TIMINGS
+        if scan.id in _CONTEXT_TIMINGS:
+            _CONTEXT_TIMINGS[scan.id]["llm_ms"] = round(_llm_dur, 2)
+    except Exception:
+        pass
 
 
     # Populate scan metadata from extracted fields if missing / placeholder
