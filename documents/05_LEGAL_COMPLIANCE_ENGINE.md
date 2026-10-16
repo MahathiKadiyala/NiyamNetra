@@ -37,9 +37,23 @@ The NiyamNetra Legal Compliance Engine is a strictly deterministic, versioned, d
 
 ### 1.1 Non-Negotiable Statutory Safeguards
 1. **Zero LLM Legal Rulings:** The LLM structures evidence text into typed JSON; deterministic code evaluates compliance. No language model output can ever declare a statutory violation.
-2. **Anti-False-Violation Principle (Fail-Open on Uncertainty):** Missing photographic evidence or optical ambiguity must produce `not_assessed`, never `fail`. A trader cannot be flagged for a violation because a back panel was not photographed.
-3. **Anti-False-Compliance Principle (Zero Fabricated Passes):** A package is never marked `compliant` if any mandatory panel or declaration remains unassessed. The denominator is always transparently recorded (e.g. `14 of 18 checks assessed`).
+2. **Anti-False-Violation Principle (Safe Outage Discipline):** Missing photographic evidence, optical ambiguity, or cloud OCR provider outage must produce `not_assessed`, never `fail`. A trader cannot be flagged for a violation because a back panel was not photographed or a cloud OCR service experienced a transient timeout.
+3. **Anti-False-Compliance Principle (Honest Denominators):** A package is never marked `compliant` if any mandatory panel or declaration remains unassessed. The denominator is always transparently recorded (e.g. `14 of 19 checks assessed`).
 4. **Physical Scale Mandate:** Numeral and letter height checks under Rule 7 Table-I strictly require an optical calibration standard (ID-1 card or 5 INR coin). If uncalibrated, the check produces `not_assessed` with a calibration capture task.
+
+### 1.2 Arithmetic Counting Contract & Denominator Invariants
+The engine strictly separates registered rule catalog entries from executable algorithmic checks:
+- **26 Registered Statutory Rules:** Total rule catalogue defined in `lmpc_2026_09_v1.json`.
+- **19 Executable Algorithmic Checks:** Checks executed programmatically during every automated scan assessment (`CHK01` through `CHK18`).
+- **7 Manual-Review & Advisory Checks:** Rules addressing subjective labeling attributes, origin marking symbols under Rule 6(4A)(d), and statutory notice recommendations.
+
+Across every scan assessment, the arithmetic relationship is guaranteed:
+$$\text{checks\_total} = 19$$
+$$\text{checks\_assessed} = \text{passed} + \text{failed}$$
+$$\text{not\_assessed} = \text{checks\_total} - \text{checks\_assessed}$$
+$$\text{total\_findings} = \text{passed} + \text{failed} + \text{not\_assessed} = \text{checks\_total} = 19$$
+
+A package achieves `COMPLIANT` if and only if $\text{passed} = 19$, with $\text{failed} = 0$ and $\text{not\_assessed} = 0$.
 
 ---
 

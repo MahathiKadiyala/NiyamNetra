@@ -120,4 +120,31 @@ When an inspector completes an inspection offline that produces `REVIEW_REQUIRED
    - Initial scan and front panel image
    - Fulfill capture task action with back panel image
    - Reassessment request
-4. **Server Reassessment Execution:** The backend runs the full 26-rule legal compliance engine against all aggregated panels, updating the overall result to `COMPLIANT` or `VIOLATION` in a single coherent server transaction.
+4. **Server Reassessment Execution:** The backend runs the authoritative legal compliance engine (19 executable checks across all registered rules) against all aggregated panels, updating the overall result to `COMPLIANT` or `VIOLATION` in a single coherent server transaction.
+
+---
+
+## 6. Offline Review Queue Caching & Bounded Storage
+
+In addition to offline visit enqueueing, NiyamNetra provides an offline review queue cache (`Frontend_App/services/queue.js` and `review_queue_cache.js`) enabling officers to browse, search, and review submitted inspections during network dropouts:
+
+### 6.1 Query-Scoped Key Architecture
+Review queue cache keys are strictly isolated by authorized user scope and query parameters:
+$$\text{cache\_key} = \text{review\_queue}:\{\text{scope}\}:\{\text{query\_hash}\}$$
+Where:
+- `scope` embeds `user_id`, `role`, and `authorized_jurisdiction` (e.g. `user_1:inspector:hyd_central`).
+- `query_hash` is an MD5/SHA-256 digest of normalized filters: `status_filter`, `reason`, `subtype`, `area`, `page`, and `limit`.
+- Summary metrics use distinct user-scoped keys: `review_queue_summary:{scope}:{filter_hash}`.
+
+### 6.2 Bounded Retention & LRU Eviction
+To prevent uncontrolled local storage consumption on field devices:
+- **Maximum 30 Cached Pages:** The cache enforces a hard ceiling of 30 stored queue pages per device.
+- **LRU Eviction:** When the 30-page limit is reached, the least recently accessed page file is automatically evicted.
+- **24-Hour TTL Ceiling:** Cache entries older than 24 hours are expired. Entries between 1 hour and 24 hours are flagged `isStale: true` but remain viewable offline until reconnection.
+
+### 6.3 Invalidation & Revision Discipline
+The review queue cache maintains strict consistency across local and server mutations:
+- **Queue Mutations:** Adjudicating a finding, resolving an inspection, fulfilling a recapture task, finalizing an inspection, or completing background sync flushes affected cached queue pages and advances the local `dataRevision` counter.
+- **In-Flight Response Protection:** In-flight network responses initiated before a mutation or logout carry an obsolete revision or session generation; they are safely discarded upon arrival and forbidden from overwriting freshly updated cache.
+- **Truthful Offline Miss:** An offline cache miss triggers a clear "Offline — Data Unavailable" state. The client never fabricates empty queues or displays misleading zero-count metrics.
+

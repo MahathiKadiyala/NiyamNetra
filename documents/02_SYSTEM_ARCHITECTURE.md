@@ -74,12 +74,13 @@ NiyamNetra is engineered around a strict separation of concerns designed to elim
                                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                         TIER 3: OPTICAL & COGNITIVE AI PROCESSING                           │
-│              (OpenCV Homography · Google Cloud Vision · Groq Llama-3.3-70B)                 │
+│     (OpenCV Homography · Cloud OCR Fallback Chain · Groq Llama-3.3-70B / Gemini Flash)      │
 ├───────────────────────────────┬───────────────────────────────┬─────────────────────────────┤
-│    PERSPECTIVE RECTIFY        │        CLOUD OCR ENGINE       │     CLOUD LLM STRUCTURING   │
-│  - 4-point contour detection  │  - High-precision lines       │  - Zero legal decision role │
-│  - Fronto-parallel warp       │  - Word-level bounding boxes  │  - Extracts typed JSON      │
-│  - Millimeter scale factor    │  - Optical confidence scores  │  - Strict field provenance  │
+│    PERSPECTIVE RECTIFY        │   OCR PROVIDER FALLBACK CHAIN │     CLOUD LLM STRUCTURING   │
+│  - 4-point contour detection  │  1. Google Vision (Primary)   │  - Zero legal decision role │
+│  - Fronto-parallel warp       │  2. OCR.space (Secondary)     │  - Extracts typed JSON      │
+│  - Millimeter scale factor    │  3. Azure Vision (Tertiary)   │  - Strict field provenance  │
+│  - Derived JPEG analysis crop │  - Outage -> not_assessed     │  - Cached via llm_cache_hash│
 └───────────────────────────────┴───────────────┬───────────────┴─────────────────────────────┘
                                                 │
                                                 ▼
@@ -87,13 +88,14 @@ NiyamNetra is engineered around a strict separation of concerns designed to elim
 │                     TIER 4: DETERMINISTIC STATUTORY RULE ENGINE                             │
 │             (Python 3.11 · Rule Pack 2026.09.v1 · Fourth Amendment G.S.R. 826(E))           │
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│  • 26 Statutory Rules: Declarations, MRP/USP math, Net Qty units, Consumer Care, Dates     │
+│  • 26 Statutory Rules: 19 executable algorithmic checks + 7 manual-review/advisory checks   │
+│  • Denominator Contract: checks_total = 19; pass + fail + not_assessed == total == 19       │
 │  • Rule 7 Table-I: Millimeter font height validation based on Area of Principal Display     │
 │  • Multi-Panel Synthesis: Cross-panel conflict detection, dual pricing, MRP sticker check   │
 └───────────────────────────────────────────────┬─────────────────────────────────────────────┘
                                                 │
                      ┌──────────────────────────┼──────────────────────────┐
-                     │ (All 26 Pass)            │ (Gaps / Blur)            │ (Confirmed Defect)
+                     │ (All 19 Executable Pass) │ (Gaps / Blur / Outage)   │ (Confirmed Defect)
                      ▼                          ▼                          ▼
             ┌─────────────────┐       ┌───────────────────┐       ┌───────────────────┐
             │    COMPLIANT    │       │  REVIEW_REQUIRED  │       │     VIOLATION     │
@@ -233,3 +235,54 @@ Field officers frequently operate in environments without cellular connectivity.
 2. **Deterministic Enqueueing:** Visits, captures, and adjudications are queued with a cryptographically secure client-generated `Idempotency-Key` (UUIDv4).
 3. **Safe Replay:** When network connectivity is restored, the queue worker flushes pending actions in chronological order. The server idempotency cache (`idempotency_keys` table) ensures network retries never create duplicate inspections or scans.
 4. **Clock Skew Tracking:** Client timestamps are recorded alongside server arrival timestamps (`clock_skew_seconds`), ensuring offline inspection timelines remain audit-verifiable.
+
+---
+
+## 7. Assessment Performance, Validated Caching & Concurrency
+
+NiyamNetra incorporates multi-tiered caching, derived artifact reuse, and strict concurrency controls developed across Modules 7.1–7.5:
+
+### 7.1 Multi-Tier Assessment Caching & Derived Artifacts
+- **Derived Analysis JPEGs:** Heavy image decoding and homography transforms execute once during upload. Downstream OCR and LLM extraction consume the normalized derived JPEG without redundant disk reads.
+- **OCR Cache (`ocr_cache_hash`, `ocr_cache`):** Computed as the SHA-256 digest of sorted image records `(panel, sha256)`. If the evidence set is unchanged upon re-assessment, raw cloud OCR calls are skipped and cached token lines are rehydrated in **< 10 ms**.
+- **LLM Structured Extraction Cache (`llm_cache_hash`, `llm_structured_data`):** Caches parsed Pydantic entity declarations keyed by OCR text hash and prompt schema version.
+- **Assessment Input Fingerprint (`assessment_input_fingerprint`):** Re-assessment fast path verifies complete cryptographic alignment across:
+  - Active Rule Pack version (`rule_pack_version`)
+  - Prompt and schema versions (`PROMPT_VERSION`, `SCHEMA_VERSION`)
+  - Configured OCR provider and fallback chain (`OCR_PROVIDER`, `OCR_PROVIDER_CHAIN`)
+  - Configured LLM provider and model name (`LLM_PROVIDER`, `GROQ_MODEL` / `GEMINI_MODEL`)
+  - E-commerce listing URL / state
+  - Transaction scope flags (imported, perishable, medical device, tobacco, sticker)
+  - Physical geometry and optical scale reference (`panel_shape`, dimensions, calibration scale)
+  - Sorted multi-panel evidence image IDs, panels, and SHA-256 digests (`{id}:{panel}:{sha256}`)
+- **Cache Invalidation Guarantee:** Uploading a new panel image, replacing scale reference, editing scope flags, or modifying provider/rule configuration instantly changes the fingerprint, purges cached findings, and forces fresh evaluation. Failed OCR or LLM results are strictly excluded from persistent success caches.
+- **Durable Columns vs In-Memory Fingerprints:** Note that while earlier documentation audit reports informally referenced `ocr_cache_fingerprint` and `assessment_cache_fingerprint`, the actual database columns defined in SQLAlchemy and Alembic migrations (0007 & 0009) on `scans` are `ocr_cache_hash` (String 64) and `llm_cache_hash` (String 64). The end-to-end composite fingerprint is `assessment_input_fingerprint`, computed dynamically via `compute_assessment_fingerprint(scan, images)` and tracked in `_ASSESSMENT_FINGERPRINTS`.
+
+
+### 7.2 Concurrency Control & Worker Lease Locking
+- **In-Flight Assessment Semaphore (`_ASSESS_SEMAPHORE`):** Caps concurrent heavy optical assessments across backend worker threads to prevent out-of-memory (OOM) termination on resource-bounded containers (e.g. Render 512 MB RAM ceiling).
+- **Process-Local Concurrency Guard:** `_INSPECTION_SUBMIT_IN_FLIGHT` and `_INSPECTION_SUBMIT_LOCK` prevent duplicate processing of the same inspection across concurrent request threads.
+- **Distributed Finalization Lease (`IdempotencyKey`):** Atomically acquires an HTTP 102 (Processing) lease token in the database (`submit_claim_insp_{id}`). Concurrent worker requests poll up to 6.0 seconds for completion or safely return the committed record, preventing race conditions and duplicate audit entries.
+
+---
+
+## 8. Rule Pack Architecture & Arithmetic Counting Contract
+
+### 8.1 Rule Pack Hierarchy (`2026.09.v1`)
+The active rule pack baseline (`rules/rule_packs/lmpc_2026_09_v1.json`) incorporates the Legal Metrology (Packaged Commodities) Rules, 2011 amended up to the Fourth Amendment Rules 2026 (G.S.R. 826(E) dated 21.09.2026):
+- **26 Registered Catalog Rules:** Total statutory rules cataloged in the versioned rule pack.
+- **19 Executable Algorithmic Checks:** Checks executed programmatically during every automated scan assessment (`CHK01` through `CHK18`).
+- **7 Manual-Review & Advisory Rules:** Rules addressing discretionary or policy-based checks (such as cosmetic origin symbol enforcement under Rule 6(4A)(d) where statutory enforceability under Section 36(1) is subject to administrative adjudication).
+
+### 8.2 Invariant Counting Contract
+The platform maintains strict arithmetic relationships across every scan and inspection verdict:
+$$\text{checks\_total} = 19$$
+$$\text{checks\_assessed} = \text{passed} + \text{failed}$$
+$$\text{not\_assessed} = \text{checks\_total} - \text{checks\_assessed}$$
+$$\text{total\_findings} = \text{passed} + \text{failed} + \text{not\_assessed} = \text{checks\_total} = 19$$
+
+A package is stamped `compliant` if and only if:
+$$\text{checks\_assessed} = 19 \quad \land \quad \text{failed} = 0 \quad \land \quad \text{not\_assessed} = 0$$
+
+Any missing panel, uncalibrated scale, or optical failure forces $\text{not\_assessed} > 0$, preventing false compliance declarations.
+

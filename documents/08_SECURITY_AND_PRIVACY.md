@@ -115,9 +115,19 @@ To prevent credential leaks in decompiled mobile packages:
    - The production APK (`NiyamNetra-v1.0.4-release.apk`) contains **zero** Google Cloud Vision keys, Groq tokens, Gemini credentials, Supabase service keys, or JWT signing secrets.
    - All external AI and database operations execute exclusively within the server-side FastAPI environment.
 2. **Server-Side Configuration Enforcement:**
-   - Backend `config.py` uses `pydantic-settings` configured with `extra="forbid"`.
+   - Backend `config.py` uses `pydantic-settings` configured with `extra="ignore"` (rather than `"forbid"`). This intentional configuration prevents application startup crashes from cloud platform-injected environment variables (such as `PORT`, `RENDER`, and `RENDER_INSTANCE_ID` on Render), while strictly validating all required secrets, types, and constraints.
    - `JWT_SECRET` has no default value and enforces a minimum length of 32 characters, failing fast at startup if missing or weak.
    - Environment files (`.env`) are strictly excluded from version control via `.gitignore`.
+
+### 4.3 Evidence URL Token Hygiene
+- **Bearer Token Sanitization:** Raw authorization tokens and sensitive query parameters are strictly scrubbed from evidence-image URLs before persistence and presentation in the inspector interface (`0004_token_hygiene.py`).
+- **Security Rationale & Scope:** Scrubbing prevents bearer credentials from leaking into client browser history, intermediary HTTP caches, screenshot captures, or exported docket logs. However, token removal alone does not guarantee total evidence security; access to evidence storage buckets remains protected by authenticated backend API endpoints and S3 pre-signed URL expiration.
+
+### 4.4 Review Queue Authorization Scoping & Offline Cache Isolation
+- **Tenant & Role Cache Scoping:** Offline review queue cache keys are strictly isolated by authenticated principal and authorized jurisdiction: `review_queue:{scope}:{query_hash}`.
+- **Account & Role Switching Protection:** If an officer logs out and another logs in, or if an officer's role changes (e.g. from `inspector` to `admin`), cache validation rejects the previous session's cached queue pages, preventing cross-account data leakage.
+- **In-Flight Race Condition Guard:** Monotonic session generation counters invalidate late in-flight network responses initiated prior to logout, account switching, or jurisdiction change.
+- **Offline Revocation Boundary:** An offline device cannot instantaneously detect server-side credential or permission revocations until network connectivity is restored and the authorization scope is re-verified. Cached review entries are bounded by a strict 24-hour TTL and 30-page storage cap.
 
 ---
 
@@ -131,3 +141,4 @@ NiyamNetra complies with the principles of the **Digital Personal Data Protectio
    - Field camera interfaces restrict capture to packaging labels and calibration standards.
    - Trader contact information captured is strictly limited to publicly displayed business signage and statutory consumer care addresses mandated by law.
 3. **Storage Limitation:** Inspection archives and evidence records are subject to statutory retention schedules under the Legal Metrology Rules, with automated archiving after statutory limitation periods.
+

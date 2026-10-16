@@ -103,3 +103,14 @@ The generated report directly answers the maintainer's 6 key operational questio
 - **Credential Redaction:** Database URLs are masked before output.
 - **No PII Exposure:** User password hashes, auth tokens, shop owner phone numbers, and raw OCR transcription text are omitted.
 - **Identifier Stability:** Uses stable record IDs (`inspection_id`, `scan_id`, `finding_id`) rather than copying full database rows into reports.
+
+---
+
+## 6. Test Verification & Cross-References
+
+- **Unit & Regression Test Suite:** [`Backend/tests/test_audit_stale_records.py`](file:///C:/Skills/Projects/NiyamNetra/Backend/tests/test_audit_stale_records.py) (18 automated scenarios covering zero-mutation invariants, transaction isolation, classification accuracy, and SQLite/PostgreSQL URL sanitization).
+- **Related Authoritative Specifications:**
+  - [06_DATA_MODEL.md](file:///C:/Skills/Projects/NiyamNetra/documents/06_DATA_MODEL.md) — Authoritative schema definitions for `Inspection`, `Scan`, `Finding`, and `AuditLog`.
+  - [07_API_AND_INTEGRATION.md](file:///C:/Skills/Projects/NiyamNetra/documents/07_API_AND_INTEGRATION.md) — Review queue query endpoints and draft inspection discovery.
+  - [08_SECURITY_AND_PRIVACY.md](file:///C:/Skills/Projects/NiyamNetra/documents/08_SECURITY_AND_PRIVACY.md) — Read-only session guarantees and PII sanitization policies.
+  - [10_TESTING_AND_QUALITY.md](file:///C:/Skills/Projects/NiyamNetra/documents/10_TESTING_AND_QUALITY.md) — Automated regression test suite metrics.

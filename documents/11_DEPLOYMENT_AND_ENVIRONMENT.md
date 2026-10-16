@@ -34,7 +34,7 @@ NiyamNetra is deployed across high-availability cloud infrastructure designed fo
 
 | Component | Technology | Hosting Platform | URL / Endpoint |
 |---|---|---|---|
-| **Backend API** | FastAPI + SQLAlchemy 2.0 | Render (Web Service) | `https://niyamnetra-backend.onrender.com` |
+| **Backend API** | FastAPI + SQLAlchemy 2.0 (Python 3.11 container runtime, Python 3.11+ supported, Python 3.11/3.13 verified locally) | Render (Web Service) | `https://niyamnetra-backend.onrender.com` |
 | **Database** | PostgreSQL 15+ | Supabase (AWS Frankfurt/Mumbai) | Port `5432` (Session Pooler) |
 | **Object Storage** | S3-Compatible Storage | Supabase Storage | Bucket: `NiyamNetra_Images` |
 | **Web Portal** | React 18 + Vite 5 + Tailwind | Vercel (Edge CDN) | `https://niyamnetra-legal-metrology-rules.vercel.app` |
@@ -162,19 +162,28 @@ REFRESH_TOKEN_EXPIRE_DAYS=30
 # --- Statutory Rules Engine Configuration ---
 RULE_PACK_VERSION=2026.09.v1
 RULES_AS_AT=2026-09-21
-ENGINE_VERSION=2.4.0
+ENGINE_VERSION=2.0.0
 
-# --- Cloud OCR Provider Credentials ---
-# Primary high-precision cloud OCR
+# --- Cloud OCR Provider Configuration & Credentials ---
+# Mode: 'auto' (fallback chain), 'google_vision', 'ocr_space', 'azure'
+OCR_PROVIDER=auto
+OCR_PROVIDER_CHAIN=google_vision,ocr_space,azure
+# 1. Google Cloud Vision (Primary)
 GOOGLE_APPLICATION_CREDENTIALS=<path_to_service_account_json_on_server>
-# Alternative / fallback cloud OCR
+GOOGLE_VISION_API_KEY=<optional_api_key_on_server>
+# 2. OCR.space (Secondary Fallback)
 OCR_SPACE_API_KEY=<set_on_server>
+# 3. Azure Computer Vision (Tertiary Fallback)
+AZURE_VISION_KEY=<set_on_server>
+AZURE_VISION_ENDPOINT=https://<resource-name>.cognitiveservices.azure.com/
 
 # --- Cloud LLM Provider Credentials ---
 # Primary high-speed structured extraction (Groq Llama-3.3-70B)
 GROQ_API_KEY=<set_on_server>
-# Fallback extraction provider
+GROQ_MODEL=llama-3.3-70b-versatile
+# Fallback extraction provider (Google Gemini Flash)
 GEMINI_API_KEY=<set_on_server>
+GEMINI_MODEL=gemini-1.5-flash
 
 # --- Security Headers & CORS ---
 CORS_ORIGIN_REGEX=^https:\/\/.*\.vercel\.app$|^https:\/\/.*\.onrender\.com$

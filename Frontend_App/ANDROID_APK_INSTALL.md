@@ -146,3 +146,11 @@ adb install -r -d app-release.apk     # -d allows a versionCode downgrade
 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` = signature mismatch (cause 1, §3).
 `INSTALL_FAILED_VERSION_DOWNGRADE` = the installed copy is newer — impossible with
 `autoIncrement` enabled, unless the APK came from an older local build.
+
+---
+
+## 7. Authoritative References
+
+- [13_RELEASE_AND_OPERATIONS.md](../documents/13_RELEASE_AND_OPERATIONS.md) — Release verification gates, checksums, and deployment operations.
+- [03_INSPECTOR_WORKFLOW.md](../documents/03_INSPECTOR_WORKFLOW.md) — Field inspector operational guide.
+- [09_OFFLINE_SYNC_AND_EVIDENCE.md](../documents/09_OFFLINE_SYNC_AND_EVIDENCE.md) — Offline SQLite storage and synchronization architecture.

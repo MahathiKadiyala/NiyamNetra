@@ -44,11 +44,11 @@ Follow this sequential storyline during live system evaluation to demonstrate en
 
 ### Stage 4: Sub-2-Second Statutory Assessment (Compliant Package)
 - **Action:** Tap "Assess Package". Observe instant turnaround (under 2 seconds).
-- **Talking Point:** *"Notice the turnaround time: 1.5 seconds end-to-end. The system runs Cloud OCR, structures text with Groq Llama-3.3-70B, and mathematically evaluates 26 statutory rules. Every check is green, with verified legal citations to Rule 6(1) and Rule 7 Table-I."*
+- **Talking Point:** *"Notice the turnaround time: 1.5 seconds end-to-end on cold path, and under 45 ms on cached fast path. The system runs Cloud OCR with automatic provider fallback, structures text with Groq Llama-3.3-70B, and mathematically evaluates 19 executable statutory checks across all 26 registered rules. Every check is green, with verified legal citations to Rule 6(1) and Rule 7 Table-I."*
 
 ### Stage 5: Incomplete Package Capture (Review-Required Case)
 - **Action:** Scan a second product, but capture **only the front panel**, leaving the back panel un-photographed. Tap "Assess".
-- **Talking Point:** *"Notice our core safety principle: The system never assumes compliance. Because the back panel is missing, consumer care and address checks return `not_assessed`, and the overall verdict is `REVIEW_REQUIRED`, with an honest denominator: 11 of 18 checks assessed."*
+- **Talking Point:** *"Notice our core safety principle: The system never assumes compliance. Because the back panel is missing, consumer care and address checks return `not_assessed`, and the overall verdict is `REVIEW_REQUIRED`, with an honest denominator: 11 of 19 checks assessed."*
 
 ### Stage 6: Smart Evidence Recapture Loop
 - **Action:** Tap the alerted capture task: `CAP_BACK_PANEL_MISSING`. Aim camera at the back panel and capture.
@@ -72,8 +72,8 @@ Follow this sequential storyline during live system evaluation to demonstrate en
 
 1. **Separation of Concerns:** Zero LLM legal decisions. The LLM structures evidence; 100% deterministic code evaluates the law.
 2. **True Statutory Currency:** Up to date with the **Fourth Amendment Rules, 2026 (G.S.R. 826(E) dated 21.09.2026)** and the Jan Vishwas Act.
-3. **Honest Denominators:** Denominators are always stated explicitly (e.g. `26 registered checks`). Partial assessments are never hidden behind vague percentages.
-4. **Offline Resilience:** Functions seamlessly in low-connectivity market environments with local SQLite persistence and idempotent replay protection.
+3. **Honest Denominators:** Denominators are always stated explicitly (19 executable checks per scan; 26 registered catalog rules). Partial assessments are never hidden behind vague percentages.
+4. **Offline Resilience:** Functions seamlessly in low-connectivity market environments with local SQLite persistence, bounded 30-page review caching, and idempotent replay protection.
 5. **Tamper-Evident Evidence Chain:** Immutable original camera files, SHA-256 cryptographic digests, and append-only database ledgers.
 
 ---

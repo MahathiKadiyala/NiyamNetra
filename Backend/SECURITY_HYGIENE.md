@@ -3,3 +3,6 @@
 - Check git log for .env commits; if present, use git filter-repo / BFG
 - Add .env to .gitignore (already present)
 - Use .env.example only in repo
+
+Authoritative Technical Reference: [08_SECURITY_AND_PRIVACY.md](../documents/08_SECURITY_AND_PRIVACY.md)
+

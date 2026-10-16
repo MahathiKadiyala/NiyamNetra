@@ -37,8 +37,8 @@ This is the standard fast-path workflow for a compliant or straightforward pre-p
 | **6** | Mobile App ➔ Edge Quality Gate | Heuristic analysis (blur variance, glare, framing) | Quality Status: `READY` (~38 ms) |
 | **7** | Field Inspector ➔ Mobile App | Captures Information Panel (Back / Crimp) | Quality Status: `READY` |
 | **8** | Mobile App ➔ FastAPI Gateway | `POST /inspections/{id}/scans` + upload images | HTTP 201 Created; SHA-256 verified on disk |
-| **9** | Mobile App ➔ FastAPI Gateway | `POST /scans/{scan_id}/assess` | Triggers Cloud OCR ➔ Cloud LLM ➔ 26 Rules |
-| **10** | Rules Engine ➔ Mobile App | Assessment Payload: `COMPLIANT` | All 26 statutory checks satisfied |
+| **9** | Mobile App ➔ FastAPI Gateway | `POST /scans/{scan_id}/assess` | Triggers Cloud OCR ➔ Cloud LLM ➔ 19 Executable Rules |
+| **10** | Rules Engine ➔ Mobile App | Assessment Payload: `COMPLIANT` | All 19 executable statutory checks satisfied |
 | **11** | Mobile App ➔ Field Inspector | Renders green "COMPLIANT" banner | Official record anchored in audit ledger |
 
 ### Screen Progression:
@@ -46,7 +46,7 @@ This is the standard fast-path workflow for a compliant or straightforward pre-p
 2. `InspectionScreen`: Displays active stores within geofenced proximity. Officer initiates visit.
 3. `CameraCaptureScreen`: Live camera viewport with bounding guidelines and optical calibration marker indicators.
 4. `QualityFeedbackModal`: Displays non-blocking green confirmation banner when image sharpness and lighting are optimal.
-5. `AssessmentResultScreen`: Displays green `COMPLIANT` status with full itemized breakdown (18/18 active checks passed).
+5. `AssessmentResultScreen`: Displays green `COMPLIANT` status with full itemized breakdown (19/19 executable checks passed).
 
 ---
 
@@ -58,7 +58,7 @@ When a package is captured partially, or when declarations suffer from specular 
 |:---:|---|---|---|
 | **1** | Inspector ➔ Mobile App | Captures Front Panel only & taps "Assess" | Single panel submitted |
 | **2** | Mobile App ➔ Backend Gateway | `POST /scans/{id}/assess` | Initial statutory evaluation executed |
-| **3** | Backend Gateway ➔ Mobile App | Verdict: `REVIEW_REQUIRED` (Completeness: 11/26 Assessed) | 15 checks `NOT_ASSESSED` (Back Panel missing) |
+| **3** | Backend Gateway ➔ Mobile App | Verdict: `REVIEW_REQUIRED` (Completeness: 11/19 Assessed) | 8 checks `NOT_ASSESSED` (Back Panel missing) |
 | **4** | Backend Gateway ➔ Mobile App | Auto-generates Capture Request: `CAP_69_46_back_missing` | Guided recapture task surfaced |
 | **5** | Mobile App ➔ Inspector | Alert: *"Review Required: Back Panel Evidence Missing"* | Targeted guidance with camera reticle |
 | **6** | Inspector ➔ Mobile App | Re-aligns camera and photographs Back Panel | High-sharpness capture saved |
@@ -132,3 +132,36 @@ When an inspection reveals confirmed statutory non-compliance, the platform assi
      - Complete itemized checklist with governing rule citations.
      - Annotated high-resolution photo evidence crops.
      - Officer signature block and cryptographic verification QR code.
+
+---
+
+## 6. Workflow 5: Draft Resumption & Inspection Finalization
+
+Field inspections frequently span multiple premises or experience intermittent interruptions. NiyamNetra supports clean session recovery and idempotent finalization:
+
+1. **Draft Discovery & Resumption:**
+   - Field officers can list pending drafts via `GET /inspections?status=draft`.
+   - The mobile interface allows officers to resume draft visits, add new packaged products, upload additional panels, or resolve recapture tasks without restarting the inspection session.
+2. **Atomic Finalization (`POST /inspections/{inspection_id}/submit`):**
+   - **Automatic Evaluation of Eligible Scans:** Any scan that has not yet been assessed, or whose evidence was modified since last evaluation, is automatically run through the rules engine before the inspection freezes.
+   - **Fresh Assessment Reuse:** Scans with unchanged evidence fingerprints bypass expensive re-computation and reuse fresh findings.
+   - **Merchant Refusal Handling:** If a merchant refuses inspection or signature, the inspector marks `signature_status: "refused"` with zero scans. The visit rolls up to a formal `refused` state in audit records rather than generating an empty or false compliant record.
+   - **Distributed Worker Lease Protection:** Uses database-backed idempotency leasing (HTTP 102 Processing status) to prevent race conditions from accidental double-tapping or concurrent worker execution. Once committed, retrying returns the persisted record with `finalization_summary`.
+
+---
+
+## 7. Workflow 6: Actionable Review Queue & Dynamic Finding Interface
+
+Supervisory officers access the centralized review queue (`GET /review/queue`) to triage and adjudicate non-routine cases:
+
+1. **Actionable Review Categories:**
+   - `unconfirmed_violation`: Algorithmic rule breaches requiring human verification before compounding or notice serving.
+   - `technical_recovery`: Transient OCR or provider network timeouts requiring automatic retry or technical reassessment.
+   - `recapture_required`: Incomplete panel coverage where mandatory declarations could not be found.
+   - `confirmed_violation`: Adjudicated non-compliant items ready for statutory notice generation.
+   - `resolved`: Inspections where all findings, remarks, and cross-panel conflicts have been settled.
+2. **Dynamic Assessment Presentation in UI:**
+   - **Itemized Check Details:** Displays check code (e.g. `CHK01`, `CHK06`), observed value (e.g. "₹45.00"), required statutory value (e.g. "Inclusive of all taxes"), and legal citation (e.g. "Rule 6(1)(e)").
+   - **Token Hygiene on Evidence URLs:** Pre-signed evidence image URLs presented in the UI are scrubbed of raw authorization bearer tokens, preventing accidental credential leakage in browser history or exported logs while preserving access-controlled viewing.
+   - **Exclusion of Drafts:** Active drafts are strictly excluded from the supervisory queue until formally finalized, preventing unfinished field work from cluttering adjudication workflows.
+

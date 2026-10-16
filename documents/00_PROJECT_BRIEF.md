@@ -25,7 +25,7 @@ By replacing slow manual calipers, paper checklists, and subjective visual estim
                                                                      ▼
 ┌──────────────────────┐     ┌──────────────────────┐     ┌──────────────────────┐
 │ 6. Officer & Docket  │ <── │ 5. Rule Engine       │ <── │ 4. Cloud LLM         │
-│ PDF Docket + QR Link │     │ 26 Checks (2026.09)  │     │ Groq Llama-3.3-70B   │
+│ PDF Docket + QR Link │     │ 26 Rules (19+7)      │     │ Groq Llama-3.3-70B   │
 └──────────────────────┘     └──────────────────────┘     └──────────────────────┘
 ```
 
@@ -57,7 +57,7 @@ Pre-packaged goods across India are governed by Chapter II of the Legal Metrolog
 | **Integrity-Preserving Capture** | Dual-image pipeline: Authoritative camera original preserved untouched with SHA-256 hash; lightweight derived analysis JPEG used for inference | Eliminates evidence tampering claims; satisfies forensic authenticity standards |
 | **Edge Quality Gate** | Client-side OpenCV/Canvas heuristic analysis (Laplacian blur, specular glare, luma histogram, edge clipping) | Prevents unreadable images from wasting cloud bandwidth or producing false findings |
 | **Separation of Concerns** | **OCR Reads → LLM Structures → Rules Decide → Aggregation Assesses** | Zero LLM legal hallucination; statutory logic is 100% deterministic, auditable, and versioned |
-| **Deterministic Rule Engine** | 26 active statutory rules evaluated mathematically against declared packaging geometry and physical calibration | Transparent legal citations, exact statutory limb attribution (Section 36(1) vs 36(2)) |
+| **Deterministic Rule Engine** | 26 registered rules: 19 executable checks and 7 manual-review/advisory checks evaluated mathematically against declared packaging geometry and physical calibration | Transparent legal citations, exact statutory limb attribution (Section 36(1) vs 36(2)) |
 | **Dual-Verdict Governance** | Automated `engine_verdict` is permanently immutable; `human_verdict` records officer adjudication with mandatory reasons | Preserves algorithmic objectivity while maintaining officer authority |
 | **Smart Recapture Loop** | Automated generation of targeted panel tasks (e.g., "Recapture Back Panel for Consumer Care") | Guides inspectors to resolve missing evidence without restarting visits |
 | **Offline Synchronization** | Local SQLite/IndexedDB queue with idempotency keys, single-use capture tokens, and clock skew correction | Full functionality without network; seamless auto-sync upon reconnection |
@@ -68,7 +68,7 @@ Pre-packaged goods across India are governed by Chapter II of the Legal Metrolog
 
 - **Mobile Client (Field App):** React Native, Expo SDK 54, `expo-camera`, `expo-secure-store`, Android standalone release APK (ARM64/ARMv7, Android 14/15 16 KB page-size aligned).
 - **Web Portal (Admin & Supervisory):** React 18, Vite 5, Tailwind CSS, Lucide icons, Recharts dashboard, Responsive PWA.
-- **Backend Service:** FastAPI (Python 3.11), SQLAlchemy 2.0 ORM, Pydantic v2 validation, Uvicorn/Gunicorn.
+- **Backend Service:** FastAPI (Python 3.11+ supported, Python 3.11 container runtime, Python 3.11/3.13 verified locally), SQLAlchemy 2.0 ORM, Pydantic v2 validation, Uvicorn/Gunicorn.
 - **Database & Storage:** PostgreSQL 15+ (Supabase connection pooler), Supabase S3-compatible Object Storage for evidence files.
 - **Optical & AI Services:** Cloud OCR (Google Cloud Vision / OCR.space), Cloud LLM (Groq Llama-3.3-70B / Google Gemini fallback for structured extraction).
 
@@ -84,9 +84,9 @@ Pre-packaged goods across India are governed by Chapter II of the Legal Metrolog
 | **GitHub Repository** | `https://github.com/Sanjaysanjay31/NiyamNetra-legal-Metrology-Rules-System-` |
 | **Active Statutory Rule Pack** | `2026.09.v1` (Fourth Amendment G.S.R. 826(E) baseline) |
 | **Statutory Rules As At** | `2026-09-21` |
-| **Registered Statutory Checks** | 26 checks (100% active and enabled) |
-| **Backend Regression Suite** | **428 passed, 0 failed** |
-| **Frontend Regression Suite** | **69 passed, 0 failed** (6 test suites) |
+| **Registered Statutory Rules** | 26 registered rules: 19 executable checks and 7 manual-review/advisory checks |
+| **Backend Test Suite** | **568 automated tests collected** across 35 test files (`pytest --collect-only -q`); recorded release baseline verified **428 passed, 0 failed** |
+| **Frontend Test Suite** | **228 assertions passed, 0 failed** across all 8 test suites (`node run_all_tests.js`) |
 | **Release APK Version** | v1.0.4 (VersionCode: 5) |
 | **Release APK File** | `release/NiyamNetra-v1.0.4-release.apk` |
 | **APK SHA-256 Digest** | `DB6897E8FB05CA062C3E44839C9605B998F0FD533481F9F8F62C3D141BF366BA` |

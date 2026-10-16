@@ -75,6 +75,7 @@ Represents a distinct enforcement visit conducted at a specific store by an offi
   - `store_id` (Integer, Foreign Key to `stores.id`)
   - `inspection_date` (Date): Canonical date of visit.
   - `status` (String(16)): `draft` -> `submitted`. Once submitted, scans and images are frozen.
+  - `signature_status` (String(16), Nullable): `signed` or `refused` (for zero-scan merchant refusal records).
   - `geofence_status` (String(16)): `verified`, `out_of_bounds`, or `unavailable`.
   - `edited_offline` (Boolean, Default False): Set if inspection was recorded in offline mode.
   - `clock_skew_seconds` (Integer, Nullable): Time delta between device clock and server clock at sync.
@@ -87,35 +88,49 @@ Represents a single packaged commodity inspected during a visit.
   - `commodity_generic`, `brand_name`, `batch_number`: Package labeling details.
   - `overall_result` (String(16)): `compliant`, `violation`, `not_assessed`, or `out_of_scope`.
   - `violation_limb` (String(16), Nullable): Legal Metrology Act limb (`36(1)` or `36(2)`).
-  - `checks_total` (Integer): Total statutory rules in active rule pack (26).
-  - `checks_assessed` (Integer): Count of checks that resolved to `pass` or `fail`.
+  - `checks_total` (Integer, Default 19): Total executable checks evaluated per scan.
+  - `checks_assessed` (Integer, Default 0): Count of checks that resolved to `pass` or `fail`.
   - `rule_pack_version` (String(32)): Active rule pack version tag (`2026.09.v1`).
   - `catalog_hash` (String(64)): SHA-256 digest of active statutory rule pack catalog.
   - `duplicate_of` (Integer, Foreign Key to `scans.id`, Nullable): Set if visual similarity exceeds threshold.
+  - `ocr_confidence_mean` (Float, Nullable): Mean optical recognition confidence.
+  - `ocr_text` (Text, Nullable): Concatenated OCR transcription.
+  - `ocr_cache_hash` (String(64), Nullable): SHA-256 digest of sorted image records `(panel, sha256)`.
+  - `ocr_cache` (Text, Nullable): Serialized cached OCR line data.
+  - `llm_structured_data` (Text, Nullable): Serialized JSON of structured entity extractions.
+  - `llm_cache_hash` (String(64), Nullable): Hash of OCR input and prompt version.
+  - `llm_provider` (String(32), Nullable): Active LLM provider (e.g. `groq`).
+  - `llm_model` (String(64), Nullable): Extraction model name (e.g. `llama-3.3-70b-versatile`).
+  - `llm_duration_ms` (Float, Nullable): Inference duration in milliseconds.
+
+> **Cache Fingerprint Note & Discrepancy Resolution:** While earlier audit reports colloquially referred to `ocr_cache_fingerprint` and `assessment_cache_fingerprint`, the actual durable database columns defined on the `scans` table (Alembic migrations 0007 and 0009) are `ocr_cache_hash` (String 64) and `llm_cache_hash` (String 64). The end-to-end composite `assessment_input_fingerprint` is dynamically computed in memory across geometry, scope flags, prompt schemas, and image digests via `compute_assessment_fingerprint(scan, images)` and tracked in `_ASSESSMENT_FINGERPRINTS` to gate the fast path.
+
 
 ### 2.5 `ScanImage` (`scan_images`)
 Represents a captured packaging panel photo attached to a scan.
 - **Key Columns:**
   - `id` (Integer, Primary Key)
   - `scan_id` (Integer, Foreign Key to `scans.id`)
-  - `panel` (String(16)): `front`, `back`, `side`, `mrp`, `batch`, `principal`, or `other`.
-  - `sha256` (String(64), Unique): Cryptographic hash of original un-modified camera photo.
-  - `file_path` (String(512)): Filesystem or storage URI for raw camera original.
-  - `analysis_file_path` (String(512), Nullable): URI for derived analysis JPEG.
-  - `rectified_file_path` (String(512), Nullable): URI for homography-rectified crop.
-  - `width_px`, `height_px`: Dimensions of original image.
-  - `rectified` (Boolean, Default False): Set if perspective correction succeeded.
+  - `panel` (String(24)): `front`, `back`, `side`, `mrp`, `batch`, `principal`, or `other`.
+  - `sha256` (String(64), Indexed): Cryptographic hash of original un-modified camera photo.
+  - `file_path` (String(400)): Storage path for authoritative raw camera bytes.
+  - `byte_size`, `width_px`, `height_px`: Image metadata.
+  - `mime_type` (String(40)): MIME format (`image/jpeg`, `image/png`).
+  - `phash` (String(16), Nullable): Banded 64-bit perceptual hash (8 bands of 8 bits) for deduplication.
 
 ### 2.6 `Finding` (`findings`)
 Represents an individual statutory check evaluation on a scan.
 - **Key Columns:**
   - `id` (Integer, Primary Key)
   - `scan_id` (Integer, Foreign Key to `scans.id`)
-  - `check_id` (String(16)): Statutory code (e.g. `CHK01`, `CHK06`, `CHK23`).
+  - `check_id` (String(16)): Statutory code (e.g. `CHK01`, `CHK06`, `CHK18`).
   - `title` (String(200)): Statutory rule title.
   - `engine_verdict` (String(16)): Algorithmic verdict (`pass`, `fail`, `not_assessed`). **IMMUTABLE.**
   - `human_verdict` (String(16), Nullable): Officer override verdict (`pass`, `fail`, `not_assessed`).
+  - `effective_verdict` (String(16), Nullable): Resolved effective verdict (`human_verdict` or `engine_verdict`).
   - `override_reason` (Text, Nullable): Mandatory officer justification (minimum 10 characters).
+  - `overridden_by` (Integer, Nullable): User ID of the officer recording the adjudication.
+  - `overridden_at` (DateTime, Nullable): UTC timestamp of officer action.
   - `severity` (String(16)): `critical`, `major`, `minor`, or `advisory`.
   - `citation` (String(160)): Specific statutory citation (e.g. *Rule 7(1) read with Table-I*).
   - `ledger_ref` (String(16)): Internal legal ledger reference (e.g. `L-03`).
@@ -124,6 +139,7 @@ Represents an individual statutory check evaluation on a scan.
 Append-only cryptographic ledger tracking every system action.
 - **Key Columns:**
   - `id` (Integer, Primary Key)
+  - `seq` (Integer, Nullable): Monotonic sequence number.
   - `inspection_id`, `scan_id`, `user_id`: Context foreign keys.
   - `action` (String(40)): Action type (e.g. `scan_created`, `assessment_rerun`, `finding_override`).
   - `hash_self` (String(64)): SHA-256 hash over `[hash_prev + user_id + action + timestamp + payload]`.
@@ -135,23 +151,23 @@ Append-only cryptographic ledger tracking every system action.
 ## 3. Supporting Security & Operational Entities
 
 - **`RevokedJti` (`revoked_jtis`):** Tracks invalidated JWT token IDs (`jti`) upon explicit logout.
-- **`LoginAttempt` (`login_attempts`):** IP and username tracking for distributed rate limiting and brute-force lockout.
-- **`ReportRecord` (`report_records`):** Archive metadata for generated PDF/DOCX inspection dockets.
-- **`IdempotencyKey` (`idempotency_keys`):** Caches incoming client `Idempotency-Key` headers for 24 hours to guarantee exactly-once processing during offline queue replays.
-- **`RuleVersionState` (`rule_version_states`):** Tracks dynamic rule pack catalog status, active version tags, and catalog SHA-256 hashes.
+- **`ReportRecord` (`report_records`):** Archive metadata for generated PDF/DOCX inspection dockets and QR digests.
+- **`IdempotencyKey` (`idempotency_keys`):** Caches incoming client `Idempotency-Key` headers for 24 hours to guarantee exactly-once processing during offline queue replays; stores worker lease tokens (`status_code: 102`) for concurrent finalization.
 
 ---
 
-## 4. Alembic Migration History
+## 4. Alembic Migration Series (0001–0009)
+
+The repository's authoritative Alembic migration sequence comprises 9 migrations in `Backend/alembic/versions/`:
 
 | Migration ID | Filename | Scope of Schema Changes |
 |---|---|---|
 | `0001` | `0001_initial_schema.py` | Core seven tables: users, stores, inspections, scans, scan_images, findings, audit_logs. |
-| `0002` | `0002_add_revoked_jtis_table.py` | JWT revocation blacklist table for secure session logout. |
-| `0003` | `0003_add_login_attempts_table.py` | Brute force protection and IP rate-limiting tracking. |
-| `0004` | `0004_add_report_records_table.py` | Storage of compiled inspection PDF reports and cryptographic QR digests. |
-| `0005` | `0005_add_idempotency_keys_table.py` | Idempotency key tracking for resilient offline batch replays. |
-| `0006` | `0006_immutable_evidence_triggers.py` | Database-level triggers preventing deletion or modification of `scan_images`. |
-| `0007` | `0007_immutable_findings_triggers.py` | Database-level triggers preventing direct updates to `findings.engine_verdict`. |
-| `0008` | `0008_add_rule_version_states_table.py` | Version tracking and catalog hashing for dynamic rule packs. |
-| `0009` | `0009_add_missing_phase2_to_phase6_columns.py` | Adds `rule_pack_version`, LLM metadata, and perceptual similarity columns to PostgreSQL. |
+| `0002` | `0002_listing_columns.py` | Adds e-commerce fields (`listing_url`, `listing_text`, `platform_has_origin_filter`) to `scans`. |
+| `0003` | `0003_reference_pixel.py` | Adds `reference_pixel_size` to `scans` for optical scale reproducibility. |
+| `0004` | `0004_token_hygiene.py` | Sanitizes image URLs in `scan_images` to remove raw bearer tokens and query strings. |
+| `0005` | `0005_report_records.py` | Adds `report_records` table for immutable PDF/DOCX generation tracking and SHA-256 hashes. |
+| `0006` | `0006_idempotency_keys_evidence_retention.py` | Creates `idempotency_keys` table and evidence retention fields. |
+| `0007` | `0007_refusal_and_ocr_cache.py` | Adds `signature_status` to `inspections` and `ocr_cache_hash` / `ocr_cache` to `scans`. |
+| `0008` | `0008_enforce_not_null_constraints.py` | Enforces strict NOT NULL constraints, foreign keys, and check constraints across tables. |
+| `0009` | `0009_add_missing_phase2_to_phase6_columns.py` | Adds LLM metadata (`llm_structured_data`, `llm_cache_hash`, `llm_provider`, `llm_model`, `llm_duration_ms`), inspection sync metrics (`clock_skew_seconds`, `edited_offline`), and finding adjudication columns (`human_verdict`, `effective_verdict`). |

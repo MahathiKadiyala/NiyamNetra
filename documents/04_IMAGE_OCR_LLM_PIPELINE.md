@@ -131,16 +131,36 @@ Packages captured in the field frequently exhibit perspective skew due to viewin
 
 ---
 
-## 4. Cloud OCR Pipeline Abstraction
+## 4. Cloud OCR Pipeline Abstraction & Fallback Resilience
 
-NiyamNetra abstracts OCR behind a pluggable interface (`ocr_engine.py` / `ocr/`):
+NiyamNetra abstracts OCR behind a pluggable interface (`ocr/` and `ocr_engine.py`) designed for zero-RAM local footprint and resilient cloud fallback:
 
-- **Primary Cloud Provider:** Google Cloud Vision API / OCR.space API.
-- **Output Schema (`OcrResult`):**
-  - `full_text`: Concatenated plain text of all recognized lines.
-  - `lines`: Array of line strings with associated polygon coordinates.
-  - `words`: Array of individual words with bounding boxes `[ymin, xmin, ymax, xmax]` normalized to image dimensions.
-  - `mean_confidence`: Average optical recognition confidence (0.0 to 1.0).
+### 4.1 Configured Fallback Order
+When `OCR_PROVIDER="auto"` (default), the `FallbackOCRProvider` executes candidate providers in strict priority order:
+1. **Google Cloud Vision (Primary):** Highest accuracy for Latin and Devanagari script, word-level bounding polygons, and dense numeral typography.
+2. **OCR.space (Secondary):** Cloud API fallback triggered upon Google Vision quota exhaustion, network timeout, or HTTP 5xx errors.
+3. **Azure Vision (Tertiary):** Additional enterprise cloud fallback for multi-provider resilience.
+
+### 4.2 Failure Handling, Timeout Discipline & Sanitized Errors
+- **Connection & Read Timeouts:** Outbound provider HTTP requests enforce strict timeouts (default 10.0s connect, 25.0s read) via `httpx`.
+- **Status Classification:** Responses are categorized into standard statuses: `STATUS_SUCCESS`, `STATUS_TIMEOUT`, `STATUS_RATE_LIMITED`, `STATUS_PROVIDER_ERROR`, `STATUS_AUTH_ERROR`, `STATUS_NO_TEXT`, or `STATUS_UNAVAILABLE`.
+- **Credential & Secret Scrubbing:** Provider error messages are strictly sanitized via `sanitize_sensitive_text()` before logging or client transmission, removing API keys, bearer tokens, and internal URL paths.
+- **Circuit Protection:** Failed providers in a chain are logged with execution duration and failure reason, seamlessly delegating to the next candidate without terminating the assessment.
+
+### 4.3 The Legal Safety Invariant
+> **Critical Statutory Principle:** An optical character recognition failure or cloud provider outage must **NEVER** be converted into a false legal violation against a merchant.
+
+When all OCR providers fail, time out, or return unreadable text:
+- The scan outcome is stamped `not_assessed` (never `violation`).
+- Dependent checks are stamped `not_assessed` with explicit reasons (e.g. *"Technical OCR/provider error: All candidate OCR providers failed"*).
+- The scan is routed to the Officer Review Queue under the `technical_recovery` subtype.
+- Officers can trigger technical reassessment or upload a clearer capture without initiating prosecution notices.
+
+### 4.4 Output Schema (`OcrResult`)
+- `full_text`: Concatenated plain text of all recognized lines.
+- `lines`: Array of line objects (`OcrLine`) with normalized text and polygon coordinates.
+- `words`: Array of individual words (`OcrWord`) with bounding boxes `[ymin, xmin, ymax, xmax]` normalized to image dimensions.
+- `mean_confidence`: Average optical recognition confidence (0.0 to 1.0).
 
 ---
 
@@ -209,6 +229,36 @@ Measured across 10 repeated full-pipeline evaluations on live Render FastAPI inf
 | 5 | Cloud LLM Structuring (Groq) | 415 ms | 405 ms | 510 ms |
 | 6 | Deterministic Statutory Rule Engine | 28 ms | 26 ms | 35 ms |
 | 7 | UI Reactive State & Rendering | 45 ms | 42 ms | 55 ms |
-| **Total** | **Composite Turnaround** | **1,598 ms** | **1,547 ms** | **1,973 ms** |
+| **Total (Cold-Path)** | **Full Pipeline Execution** | **1,598 ms** | **1,547 ms** | **1,973 ms** |
+| **Fast-Path (Cache Hit)** | **Validated Re-Assessment** | **< 45 ms** | **< 40 ms** | **< 60 ms** |
 
-*Result:* Turnaround is consistently sub-2-second, enabling seamless field operation without officer delay.
+*Result:* Cold-path turnaround is consistently sub-2-second. When evidence remains unchanged, the validated fast path rehydrates cached OCR and LLM findings in under 45 ms, enabling instantaneous re-checks.
+
+---
+
+## 8. Real-Provider OCR Smoke-Test Procedure
+
+To safely verify configured cloud OCR provider credentials and external network egress without executing full end-to-end statutory assessments or creating database records, NiyamNetra provides an operational smoke-test utility (`Backend/scripts/smoke_ocr_provider.py`):
+
+### 8.1 Command Syntax & Explicit Opt-In
+To prevent accidental consumption of paid cloud quotas or uncontrolled network calls during automated test suites, the script strictly requires the `--live-provider-call` flag to permit external API calls:
+
+```bash
+cd Backend
+python scripts/smoke_ocr_provider.py <path_to_packaging_image.jpg> --live-provider-call
+```
+
+Optional arguments:
+- `--provider [auto|google_vision|ocr_space|azure]`: Override provider selection.
+- `--json`: Output machine-readable JSON metrics.
+
+### 8.2 Operational Safety Boundaries
+- **Zero Database Writes:** The smoke test interacts solely with the OCR provider abstraction layer. It performs zero SQL queries, creates no inspections or scans, and inserts no finding rows.
+- **Credential Scrubbing:** API keys, authorization tokens, and raw extracted text are strictly redacted from stdout/stderr, reporting only high-level metadata (line count, mean confidence, candidate trace).
+- **Exit Code Contract:**
+  - `0`: Successful text extraction by configured provider.
+  - `1`: Failure (all candidates failed or zero text recognized).
+  - `2`: Blocked (execution attempted without explicit `--live-provider-call` flag).
+
+> **Verification Boundary:** A successful smoke test confirms that the cloud OCR provider can receive an image and return word bounding boxes. It does not replace full end-to-end integration testing of the OCR ➔ LLM ➔ deterministic legal rule engine pipeline.
+

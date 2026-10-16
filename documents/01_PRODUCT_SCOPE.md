@@ -104,11 +104,25 @@ Aggregated package-level outcomes:
 - `not_assessed`: Essential evidence is missing or uncalibrated; requires targeted recapture.
 - `out_of_scope`: Package is statutorily exempt (e.g. package net weight ≤ 10 g / 10 ml under Rule 26(a), or industrial consumer package).
 
-### 4.4 Officer Review Queue & Actionable Capture Tasks
-- Automatically generated tasks when a package has incomplete coverage (e.g., `CAP_69_46_back_missing`: "Panel 'back' not captured; required for Rule 6(1)(f) consumer care").
-- Review queue items highlighting cross-panel conflicts (e.g., MRP discrepancy between front label and top crimp).
+### 4.4 Draft Resumption & Inspection Finalization
+- **Draft Session Discovery & Resumption:** Field officers can discover and resume unfinished draft inspection sessions (`GET /inspections?status=draft`) across app restarts or multi-stage shop visits.
+- **Atomic Finalization Lifecycle (`POST /inspections/{id}/submit`):**
+  - Automatically assesses any unassessed eligible scans or scans with updated evidence before freezing the inspection record.
+  - Reuses fresh assessment results when evidence fingerprints are unchanged.
+  - Accommodates zero-scan merchant refusal (`signature_status: "refused"`), recording a formal refusal audit trail without generating false compliance verdicts.
+  - Distributed worker lease locking prevents race conditions and duplicate concurrent finalizations.
 
-### 4.5 Enforcement Dossiers & Statutory Inspection Reports
+### 4.5 Actionable Officer Review Queue & Subtype Categorization
+Submitted inspections requiring supervisory verification enter the centralized Officer Review Queue (`GET /review/queue`). Drafts are strictly excluded until finalized. Items are grouped into actionable categories:
+- `unconfirmed_violation`: Algorithmic rule breaches awaiting officer adjudication and statutory sign-off.
+- `technical_recovery`: Optical or provider outages (network timeout, rate limit) requiring automated retry or technical reassessment without penalizing the merchant.
+- `recapture_required`: Scans with incomplete panel coverage or missing scale reference requiring targeted recapture.
+- `confirmed_violation`: Violations formally confirmed by officer adjudication awaiting notice issuance.
+- `resolved`: Adjudicated inspections where all findings and conflicts have been settled.
+
+Server-side subtype filtering (`technical_recovery`, `recapture_required`, `incomplete_coverage`, `unconfirmed_violation`, `confirmed_violation`, `low_confidence`, `offline_edit`) applies before pagination, ensuring stable offsets, consistent queue metrics, and accurate summary totals.
+
+### 4.6 Enforcement Dossiers & Statutory Inspection Reports
 - **Violation Dossier:** Structured summary citing the specific statutory limb of Section 36 (Section 36(1) for packaging/label defects; Section 36(2) for short quantity).
 - **Inspection Docket (PDF & DOCX):** Timestamped inspection summary with embedded high-resolution annotated crops, officer notes, cryptographic SHA-256 evidence digests, and an online verification QR code.
 

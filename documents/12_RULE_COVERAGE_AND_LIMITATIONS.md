@@ -1,14 +1,14 @@
 # Statutory Rule Coverage & Operational Limitations
 
 **Document Code:** `DOC-12`  
-**Active Production Baseline:** Rule Pack `2026.09.v1` (26 Rules Registered)  
+**Active Production Baseline:** Rule Pack `2026.09.v1` (26 Rules Registered: 19 Executable Checks, 7 Manual-Review/Advisory Checks)  
 **Legal Framework:** Legal Metrology (Packaged Commodities) Rules, 2011  
 
 ---
 
 ## 1. What NiyamNetra Actually Automates
 
-To ensure credibility with enforcement authorities, NiyamNetra explicitly documents its statutory automation scope. The platform does not claim to automate "all of legal metrology"; it provides automated decision-support across **26 specific, versioned statutory checks**:
+To ensure credibility with enforcement authorities, NiyamNetra explicitly documents its statutory automation scope. The platform does not claim to automate "all of legal metrology"; it provides automated decision-support across **26 versioned statutory rules: 19 executable algorithmic checks and 7 manual-review/advisory checks**:
 
 ```
                               ┌────────────────────────────────────────┐
