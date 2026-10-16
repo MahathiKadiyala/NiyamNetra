@@ -1068,15 +1068,20 @@ def submit_inspection(body: SubmitInspectionRequest,
             set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(img_set_parts)).encode()).hexdigest()
 
             is_identical = False
-            if bool(existing_findings) and (s.overall_result != "not_assessed" or getattr(s, "ocr_cache_hash", None) is not None):
+            target_rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+            rp = getattr(s, "rule_pack_version", None) or target_rp
+            llm_p = getattr(settings, "LLM_PROVIDER", "groq")
+            llm_m = getattr(settings, "GEMINI_MODEL", "") if llm_p in ("gemini", "google_gemini", "gemini-flash") else getattr(settings, "GROQ_MODEL", "")
+            config_matches = (
+                rp == target_rp
+                and (not s.llm_provider or s.llm_provider == llm_p)
+                and (not s.llm_model or s.llm_model == llm_m)
+            )
+            if bool(existing_findings) and s.overall_result != "not_assessed" and config_matches:
                 if cached_fp is not None:
                     is_identical = (cached_fp == curr_fingerprint)
                 elif getattr(s, "ocr_cache_hash", None) is not None:
-                    rp = getattr(s, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
-                    is_identical = (
-                        getattr(s, "ocr_cache_hash", None) == set_hash
-                        and getattr(s, "rule_pack_version", None) == rp
-                    )
+                    is_identical = (getattr(s, "ocr_cache_hash", None) == set_hash)
 
             if existing_findings and is_identical:
                 _ASSESSMENT_FINGERPRINTS[s.id] = curr_fingerprint

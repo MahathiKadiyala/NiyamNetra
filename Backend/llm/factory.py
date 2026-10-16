@@ -124,13 +124,26 @@ def structure_inspection_ocr(
                 import json as _json
                 data_dict = _json.loads(persisted_data) if isinstance(persisted_data, str) else persisted_data
                 res = StructuredDeclarationResult.from_dict(data_dict)
-                res.metadata["cache_hit"] = True
-                res.metadata["persisted_rehydrated"] = True
-                if len(_LLM_MEMORY_CACHE) >= _MAX_CACHE_ITEMS:
-                    _LLM_MEMORY_CACHE.pop(next(iter(_LLM_MEMORY_CACHE)))
-                _LLM_MEMORY_CACHE[cache_hash] = res
-                logger.info("[LLM Cache] Persisted evidence cache hit for hash %s", cache_hash[:12])
-                return res
+                meta = res.metadata or {}
+                if (
+                    meta.get("status") == LLM_STATUS_SUCCESS
+                    and meta.get("llm_prompt_version") == PROMPT_VERSION
+                    and meta.get("llm_schema_version") == SCHEMA_VERSION
+                    and meta.get("llm_provider") == primary.name
+                    and meta.get("llm_model") == primary.model_name
+                ):
+                    res.metadata["cache_hit"] = True
+                    res.metadata["persisted_rehydrated"] = True
+                    if len(_LLM_MEMORY_CACHE) >= _MAX_CACHE_ITEMS:
+                        _LLM_MEMORY_CACHE.pop(next(iter(_LLM_MEMORY_CACHE)))
+                    _LLM_MEMORY_CACHE[cache_hash] = res
+                    logger.info("[LLM Cache] Persisted evidence cache hit for hash %s", cache_hash[:12])
+                    return res
+                else:
+                    logger.info(
+                        "[LLM Cache] Persisted structured data invalid or version mismatch (status=%s prov=%s model=%s)",
+                        meta.get("status"), meta.get("llm_provider"), meta.get("llm_model")
+                    )
             except Exception as e:
                 logger.warning("[LLM Cache] Failed to rehydrate persisted structured data: %s", e)
 
@@ -151,6 +164,8 @@ def structure_inspection_ocr(
                 result = fallback.extract_declarations(packaged_ocr, evidence_meta)
                 result.metadata["fallback_used"] = True
                 result.metadata["primary_error"] = result.metadata.get("error")
+                if result.metadata.get("status") == LLM_STATUS_SUCCESS:
+                    cache_hash = compute_llm_cache_hash(packaged_ocr, fallback.name, fallback.model_name)
 
     # 7. Record evidence fingerprint and stage in cache if successful
     result.metadata["evidence_fingerprint"] = cache_hash

@@ -71,7 +71,10 @@ def compute_assessment_fingerprint(scan: Scan, images: list[ScanImage]) -> str:
     ocr_prov = getattr(settings, "OCR_PROVIDER", "google_vision")
     ocr_chain = getattr(settings, "OCR_PROVIDER_CHAIN", "")
     llm_prov = getattr(settings, "LLM_PROVIDER", "groq")
-    llm_mod = getattr(settings, "GROQ_MODEL", "")
+    if llm_prov in ("gemini", "google_gemini", "gemini-flash"):
+        llm_mod = getattr(settings, "GEMINI_MODEL", "")
+    else:
+        llm_mod = getattr(settings, "GROQ_MODEL", "")
     listing = getattr(scan, "listing_url", None) or ""
 
     parts = [
@@ -489,15 +492,20 @@ def assess_scan(
         _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         is_identical = False
-        if bool(_existing_findings) and (scan.overall_result != "not_assessed" or getattr(scan, "ocr_cache_hash", None) is not None):
+        target_rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+        rp = getattr(scan, "rule_pack_version", None) or target_rp
+        llm_p = getattr(settings, "LLM_PROVIDER", "groq")
+        llm_m = getattr(settings, "GEMINI_MODEL", "") if llm_p in ("gemini", "google_gemini", "gemini-flash") else getattr(settings, "GROQ_MODEL", "")
+        config_matches = (
+            rp == target_rp
+            and (not scan.llm_provider or scan.llm_provider == llm_p)
+            and (not scan.llm_model or scan.llm_model == llm_m)
+        )
+        if bool(_existing_findings) and scan.overall_result != "not_assessed" and config_matches:
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
             elif getattr(scan, "ocr_cache_hash", None) is not None:
-                rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
-                is_identical = (
-                    getattr(scan, "ocr_cache_hash", None) == _set_hash
-                    and getattr(scan, "rule_pack_version", None) == rp
-                )
+                is_identical = (getattr(scan, "ocr_cache_hash", None) == _set_hash)
         if _existing_findings and is_identical:
             _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
             _logger.info(
@@ -536,15 +544,20 @@ def assess_scan(
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
         is_identical = False
-        if bool(_existing_findings) and (scan.overall_result != "not_assessed" or getattr(scan, "ocr_cache_hash", None) is not None):
+        target_rp = getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
+        rp = getattr(scan, "rule_pack_version", None) or target_rp
+        llm_p = getattr(settings, "LLM_PROVIDER", "groq")
+        llm_m = getattr(settings, "GEMINI_MODEL", "") if llm_p in ("gemini", "google_gemini", "gemini-flash") else getattr(settings, "GROQ_MODEL", "")
+        config_matches = (
+            rp == target_rp
+            and (not scan.llm_provider or scan.llm_provider == llm_p)
+            and (not scan.llm_model or scan.llm_model == llm_m)
+        )
+        if bool(_existing_findings) and scan.overall_result != "not_assessed" and config_matches:
             if cached_fp is not None:
                 is_identical = (cached_fp == curr_fingerprint)
             elif getattr(scan, "ocr_cache_hash", None) is not None:
-                rp = getattr(scan, "rule_pack_version", None) or getattr(settings, "RULE_PACK_VERSION", "2026.09.v1")
-                is_identical = (
-                    getattr(scan, "ocr_cache_hash", None) == _set_hash
-                    and getattr(scan, "rule_pack_version", None) == rp
-                )
+                is_identical = (getattr(scan, "ocr_cache_hash", None) == _set_hash)
         if _existing_findings and is_identical and not force:
             _ASSESSMENT_FINGERPRINTS[scan.id] = curr_fingerprint
             _logger.info(
@@ -634,6 +647,7 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fing
     assess_log = _log.getLogger("niyamnetra.assess")
     _images = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
     _images_count = len(_images)
+    initial_img_parts = sorted(f"{getattr(im, 'id', 0)}:{im.panel}:{im.sha256}" for im in _images)
     if fingerprint is None:
         fingerprint = compute_assessment_fingerprint(scan, _images)
     assessment_id = f"assess-{scan.id}-{fingerprint[:8]}"
@@ -717,7 +731,25 @@ def _assess_inner(scan: Scan, user: User, db: Session, force: bool = False, fing
     from queries import resolve_duplicate
     scan.duplicate_of = resolve_duplicate(db, scan, inspection)
 
-    _ASSESSMENT_FINGERPRINTS[scan.id] = fingerprint
+    # Invariant (Section 3 & Module 7.2): verify evidence has not changed while assessment was running
+    fresh_images = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
+    fresh_img_parts = sorted(f"{getattr(im, 'id', 0)}:{im.panel}:{im.sha256}" for im in fresh_images)
+    if fresh_img_parts != initial_img_parts:
+        db.rollback()
+        assess_log.warning(
+            "[ASSESSMENT] stale_assessment_aborted scan_id=%s evidence_modified_during_assessment",
+            scan.id,
+        )
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Evidence was modified while evaluation was in progress; retry assessment",
+        )
+
+    final_fingerprint = compute_assessment_fingerprint(scan, fresh_images)
+    if verdict.overall_result != "not_assessed":
+        _ASSESSMENT_FINGERPRINTS[scan.id] = final_fingerprint
+    else:
+        _ASSESSMENT_FINGERPRINTS.pop(scan.id, None)
 
     t_db_start = time.perf_counter()
     try:

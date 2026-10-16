@@ -98,10 +98,11 @@ def package_ocr_for_llm(ocr_input: list[OcrResult] | OcrResult) -> str:
         art_type = ocr.input_artifact_type or "analysis"
         w = ocr.source_width or "unknown"
         h = ocr.source_height or "unknown"
+        engine_str = getattr(ocr, "provider", None) or getattr(ocr, "engine", None) or "unknown"
 
         header = (
             f"--- PANEL: {panel.upper()} | IMAGE_ID: {img_id} | SCAN_ID: {scan_id} "
-            f"| INSP_ID: {insp_id} | ARTIFACT: {art_type} | DIMS: {w}x{h} ---"
+            f"| INSP_ID: {insp_id} | ARTIFACT: {art_type} | ENGINE: {engine_str} | DIMS: {w}x{h} ---"
         )
         parts.append(header)
 
