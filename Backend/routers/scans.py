@@ -343,10 +343,10 @@ async def upload_image(
             if _old_findings:
                 for _f in _old_findings:
                     db.delete(_f)
-                scan.overall_result = "not_assessed"
-                scan.checks_assessed = 0
-                scan.violation_limb = None
-                scan.recommended_action = None
+            scan.overall_result = "not_assessed"
+            scan.checks_assessed = 0
+            scan.violation_limb = None
+            scan.recommended_action = None
             db.commit()
             break
         except IntegrityError:
@@ -539,8 +539,10 @@ def assess_scan(
             )
         db.refresh(scan)
         _existing_findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        fresh_imgs = db.query(ScanImage).filter(ScanImage.scan_id == scan.id).all()
+        curr_fingerprint = compute_assessment_fingerprint(scan, fresh_imgs)
         import hashlib as _hashlib
-        _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in _imgs)
+        _img_set_parts = sorted(f"{_im.panel}:{_im.sha256}" for _im in fresh_imgs)
         _set_hash = _hashlib.sha256((_OCR_CACHE_SALT + "|" + "|".join(_img_set_parts)).encode()).hexdigest()
         cached_fp = _ASSESSMENT_FINGERPRINTS.get(scan.id)
         is_identical = False
