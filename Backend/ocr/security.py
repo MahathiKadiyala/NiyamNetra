@@ -17,6 +17,7 @@ _SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z\-_]{35}"),
     re.compile(r"(?i)(?:Ocp-Apim-Subscription-Key)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
     re.compile(r"(?i)https?://[^\s]*[?&](?:key|apikey|api_key)=([a-zA-Z0-9_\-\.]{6,})"),
+    re.compile(r"://[^:]*:([^@\s]{4,})@"),
 ]
 
 
@@ -42,6 +43,21 @@ def sanitize_sensitive_text(text: str | None) -> str | None:
             val = getattr(settings, attr, None)
             if val and isinstance(val, str) and len(val.strip()) >= 4:
                 sanitized = sanitized.replace(val.strip(), "[REDACTED]")
+
+        db_url = getattr(settings, "DATABASE_URL", None)
+        if db_url and isinstance(db_url, str):
+            import urllib.parse
+            try:
+                parsed = urllib.parse.urlsplit(db_url)
+                if parsed.password:
+                    raw_pw = parsed.password
+                    unquoted_pw = urllib.parse.unquote(raw_pw)
+                    if len(raw_pw) >= 4:
+                        sanitized = sanitized.replace(raw_pw, "[REDACTED]")
+                    if len(unquoted_pw) >= 4:
+                        sanitized = sanitized.replace(unquoted_pw, "[REDACTED]")
+            except Exception:
+                pass
     except Exception:
         pass
 

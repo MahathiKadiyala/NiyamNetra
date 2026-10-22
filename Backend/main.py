@@ -10,6 +10,7 @@ from config import settings
 from routers import admin, auth, enforcement, inspections, recapture, reports, review, scans
 
 logger = logging.getLogger("niyamnetra.startup")
+error_logger = logging.getLogger("niyamnetra.error")
 
 
 @asynccontextmanager
@@ -111,9 +112,31 @@ async def value_error_handler(_r: Request, exc: ValueError):
 @app.exception_handler(Exception)
 async def global_exception_handler(_r: Request, exc: Exception):
     import traceback
+    from ocr.security import sanitize_sensitive_text
+
+    raw_tb = traceback.format_exc()
+    sanitized_exc = sanitize_sensitive_text(str(exc))
+    sanitized_tb = sanitize_sensitive_text(raw_tb)
+
+    error_logger.error(
+        "Unhandled exception processing %s %s: %s\n%s",
+        _r.method,
+        _r.url.path,
+        sanitized_exc,
+        sanitized_tb,
+    )
+
+    env_name = str(getattr(settings, "ENV", "dev")).strip().lower()
+    is_prod = env_name in ("prod", "production") or env_name not in ("dev", "development", "test")
+
+    if is_prod:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "traceback": traceback.format_exc()},
+        content={"detail": str(exc), "traceback": raw_tb},
     )
 
 
