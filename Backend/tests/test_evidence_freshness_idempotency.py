@@ -38,7 +38,7 @@ def env():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=eng)
-    Session = sessionmaker(bind=eng)
+    Session = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)
     db = Session()
 
     inspector = User(
@@ -146,49 +146,63 @@ def test_recapture_after_successful_assessment_invalidates_cache_and_findings(en
     db.add(s_img1)
     db.commit()
 
-    # 1. Run initial assessment
-    res1 = client.post(f"/scans/{scan.id}/assess")
-    assert res1.status_code == 200
-    db.refresh(scan)
-    assert scan.ocr_cache_hash is not None
-    assert scan.overall_result != "not_assessed"
-    fp1 = res1.json()["diagnostics"]["assessment_input_fingerprint"]
-
-    # 2. Upload recapture / additional back panel
-    back_raw = _make_dummy_image("Parle G Back Panel Ingredients and Mfg Date")
-    res_up = client.post(
-        f"/scans/{scan.id}/images",
-        data={"panel": "back"},
-        files={"file": ("back.jpg", back_raw, "image/jpeg")},
+    mock_lines = [
+        OcrLine(text="PARLE G BISCUITS", confidence=0.95, box=[[10, 10], [100, 10], [100, 30], [10, 30]], height_px=14.0),
+        OcrLine(text="NET QTY 100 g", confidence=0.96, box=[[10, 40], [80, 40], [80, 60], [10, 60]], height_px=12.0),
+        OcrLine(text="MRP Rs. 10.00", confidence=0.97, box=[[10, 70], [90, 70], [90, 90], [10, 90]], height_px=12.0),
+    ]
+    mock_ocr = OcrResult(
+        lines=mock_lines,
+        engine="mock_engine",
+        mean_confidence=0.96,
+        failure_reason=None,
+        status=STATUS_SUCCESS,
     )
-    assert res_up.status_code in (200, 201)
 
-    # 3. Verify cache invalidation & evidence freshness on scan
-    db.refresh(scan)
-    assert scan.ocr_cache_hash is None
-    assert scan.ocr_cache is None
-    assert scan.llm_cache_hash is None
-    assert scan.overall_result == "not_assessed"
-    assert scan.checks_assessed == 0
+    with patch("ocr_engine.run_ocr", return_value=mock_ocr):
+        # 1. Run initial assessment
+        res1 = client.post(f"/scans/{scan.id}/assess")
+        assert res1.status_code == 200
+        db.refresh(scan)
+        assert scan.ocr_cache_hash is not None
+        assert scan.overall_result != "not_assessed"
+        fp1 = res1.json()["diagnostics"]["assessment_input_fingerprint"]
 
-    # Old findings must NOT survive
-    findings_after_upload = db.query(Finding).filter(Finding.scan_id == scan.id).all()
-    assert len(findings_after_upload) == 0
+        # 2. Upload recapture / additional back panel
+        back_raw = _make_dummy_image("Parle G Back Panel Ingredients and Mfg Date")
+        res_up = client.post(
+            f"/scans/{scan.id}/images",
+            data={"panel": "back"},
+            files={"file": ("back.jpg", back_raw, "image/jpeg")},
+        )
+        assert res_up.status_code in (200, 201)
 
-    # 4. GET /scans/{scan.id} reflects unassessed state honestly
-    get_res = client.get(f"/scans/{scan.id}")
-    assert get_res.status_code == 200
-    assert get_res.json()["overall_result"] == "not_assessed"
-    assert len(get_res.json()["findings"]) == 0
+        # 3. Verify cache invalidation & evidence freshness on scan
+        db.refresh(scan)
+        assert scan.ocr_cache_hash is None
+        assert scan.ocr_cache is None
+        assert scan.llm_cache_hash is None
+        assert scan.overall_result == "not_assessed"
+        assert scan.checks_assessed == 0
 
-    # 5. Reassessment evaluates updated evidence set
-    res2 = client.post(f"/scans/{scan.id}/assess")
-    assert res2.status_code == 200
-    db.refresh(scan)
-    assert scan.ocr_cache_hash is not None
-    fp2 = res2.json()["diagnostics"]["assessment_input_fingerprint"]
-    assert fp1 != fp2
-    assert len(res2.json()["images"]) == 2
+        # Old findings must NOT survive
+        findings_after_upload = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+        assert len(findings_after_upload) == 0
+
+        # 4. GET /scans/{scan.id} reflects unassessed state honestly
+        get_res = client.get(f"/scans/{scan.id}")
+        assert get_res.status_code == 200
+        assert get_res.json()["overall_result"] == "not_assessed"
+        assert len(get_res.json()["findings"]) == 0
+
+        # 5. Reassessment evaluates updated evidence set
+        res2 = client.post(f"/scans/{scan.id}/assess")
+        assert res2.status_code == 200
+        db.refresh(scan)
+        assert scan.ocr_cache_hash is not None
+        fp2 = res2.json()["diagnostics"]["assessment_input_fingerprint"]
+        assert fp1 != fp2
+        assert len(res2.json()["images"]) == 2
 
 
 def test_reuse_valid_cached_result_when_evidence_unchanged(env):
@@ -233,15 +247,29 @@ def test_reuse_valid_cached_result_when_evidence_unchanged(env):
     db.add(s_img)
     db.commit()
 
-    # First call
-    r1 = client.post(f"/scans/{scan.id}/assess")
-    assert r1.status_code == 200
-    d1 = r1.json()
+    mock_lines = [
+        OcrLine(text="TATA TEA PREMIUM", confidence=0.95, box=[[10, 10], [100, 10], [100, 30], [10, 30]], height_px=14.0),
+        OcrLine(text="NET QTY 250 g", confidence=0.96, box=[[10, 40], [80, 40], [80, 60], [10, 60]], height_px=12.0),
+        OcrLine(text="MRP Rs. 120.00", confidence=0.97, box=[[10, 70], [90, 70], [90, 90], [10, 90]], height_px=12.0),
+    ]
+    mock_ocr = OcrResult(
+        lines=mock_lines,
+        engine="mock_engine",
+        mean_confidence=0.96,
+        failure_reason=None,
+        status=STATUS_SUCCESS,
+    )
 
-    # Second call (unchanged evidence): fast idempotent return
-    r2 = client.post(f"/scans/{scan.id}/assess")
-    assert r2.status_code == 200
-    d2 = r2.json()
+    with patch("ocr_engine.run_ocr", return_value=mock_ocr):
+        # First call
+        r1 = client.post(f"/scans/{scan.id}/assess")
+        assert r1.status_code == 200
+        d1 = r1.json()
+
+        # Second call (unchanged evidence): fast idempotent return
+        r2 = client.post(f"/scans/{scan.id}/assess")
+        assert r2.status_code == 200
+        d2 = r2.json()
 
     assert d1["overall_result"] == d2["overall_result"]
     assert d1["diagnostics"]["assessment_input_fingerprint"] == d2["diagnostics"]["assessment_input_fingerprint"]
@@ -532,19 +560,33 @@ def test_concurrent_duplicate_requests_reuse_result_without_conflicts(env):
     db.add(s_img)
     db.commit()
 
+    mock_lines = [
+        OcrLine(text="EVEREST GARAM MASALA", confidence=0.95, box=[[10, 10], [100, 10], [100, 30], [10, 30]], height_px=14.0),
+        OcrLine(text="NET QTY 100 g", confidence=0.96, box=[[10, 40], [80, 40], [80, 60], [10, 60]], height_px=12.0),
+        OcrLine(text="MRP Rs. 55.00", confidence=0.97, box=[[10, 70], [90, 70], [90, 90], [10, 90]], height_px=12.0),
+    ]
+    mock_ocr = OcrResult(
+        lines=mock_lines,
+        engine="mock_engine",
+        mean_confidence=0.96,
+        failure_reason=None,
+        status=STATUS_SUCCESS,
+    )
+
     results = []
 
-    def _call_assess():
-        r = client.post(f"/scans/{scan.id}/assess")
-        results.append(r)
+    with patch("ocr_engine.run_ocr", return_value=mock_ocr):
+        def _call_assess():
+            r = client.post(f"/scans/{scan.id}/assess")
+            results.append(r)
 
-    t1 = threading.Thread(target=_call_assess)
-    t2 = threading.Thread(target=_call_assess)
+        t1 = threading.Thread(target=_call_assess)
+        t2 = threading.Thread(target=_call_assess)
 
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
     assert len(results) == 2
     assert results[0].status_code == 200

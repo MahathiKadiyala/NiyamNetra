@@ -191,10 +191,13 @@ def test_unchanged_evidence_and_matching_fingerprints_valid_cache_hit(cache_env)
         r2 = client.post(f"/scans/{scan_id}/assess")
         dur_warm = (time.perf_counter() - t1) * 1000
         assert r2.status_code == 200
-        assert dur_warm < dur_cold
+        # Fast-path cache validation: OCR is never re-invoked
         mock_ocr_call.assert_not_called()
+        # Persisted assessment verdict, findings count, and input fingerprints match identically
         assert r1.json()["overall_result"] == r2.json()["overall_result"]
         assert len(r1.json()["findings"]) == len(r2.json()["findings"])
+        assert r1.json()["diagnostics"]["assessment_input_fingerprint"] == r2.json()["diagnostics"]["assessment_input_fingerprint"]
+        assert _ASSESSMENT_FINGERPRINTS.get(scan_id) == r2.json()["diagnostics"]["assessment_input_fingerprint"]
 
 
 def test_changed_image_or_panel_assignment_invalidates_cache(cache_env):

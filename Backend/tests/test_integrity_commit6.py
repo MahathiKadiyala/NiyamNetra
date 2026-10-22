@@ -24,6 +24,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import threading
 import time
 import cv2
 import numpy as np
@@ -73,7 +74,13 @@ def _post_scan(client, insp_id: int, commodity: str = "Test Commodity") -> int:
 
 
 @pytest.fixture
-def integrity_env():
+def integrity_env(monkeypatch):
+    class SyncThread(threading.Thread):
+        def start(self):
+            self.run()
+
+    monkeypatch.setattr(threading, "Thread", SyncThread)
+
     eng = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},

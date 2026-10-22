@@ -24,7 +24,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from config import settings
-from database import SessionLocal
+from database import Base, SessionLocal
 from models import Finding, Inspection, Scan, ScanImage
 from ocr.base import (
     OcrLine,
@@ -225,35 +225,43 @@ def test_safe_error_and_secret_redaction(dummy_image_file):
         assert "[REDACTED]" in serialized
 
 
-def test_smoke_test_performs_zero_database_writes(dummy_image_file):
-    """Requirement 2 & 4: Smoke test performs zero DB writes and creates no records."""
+@pytest.fixture
+def smoke_db():
+    """Ensure database schema is initialized for testing zero-write database invariants."""
     db = SessionLocal()
+    Base.metadata.create_all(bind=db.get_bind())
     try:
-        insp_count_before = db.query(Inspection).count()
-        scan_count_before = db.query(Scan).count()
-        find_count_before = db.query(Finding).count()
-        img_count_before = db.query(ScanImage).count()
-
-        mock_provider = MagicMock()
-        mock_provider.name = "ocr_space"
-        mock_provider.is_configured.return_value = True
-        mock_provider.recognize.return_value = OcrResult(
-            provider="ocr_space",
-            status=STATUS_SUCCESS,
-            lines=[OcrLine(text="NET WT 500 g", confidence=0.99)],
-        )
-
-        with patch("ocr.factory.get_ocr_provider", return_value=mock_provider):
-            exit_code, summary = run_smoke_ocr(dummy_image_file, live_provider_call=True)
-            assert exit_code == 0
-
-        # Assert count invariant
-        assert db.query(Inspection).count() == insp_count_before
-        assert db.query(Scan).count() == scan_count_before
-        assert db.query(Finding).count() == find_count_before
-        assert db.query(ScanImage).count() == img_count_before
+        yield db
     finally:
         db.close()
+
+
+def test_smoke_test_performs_zero_database_writes(dummy_image_file, smoke_db):
+    """Requirement 2 & 4: Smoke test performs zero DB writes and creates no records."""
+    db = smoke_db
+    insp_count_before = db.query(Inspection).count()
+    scan_count_before = db.query(Scan).count()
+    find_count_before = db.query(Finding).count()
+    img_count_before = db.query(ScanImage).count()
+
+    mock_provider = MagicMock()
+    mock_provider.name = "ocr_space"
+    mock_provider.is_configured.return_value = True
+    mock_provider.recognize.return_value = OcrResult(
+        provider="ocr_space",
+        status=STATUS_SUCCESS,
+        lines=[OcrLine(text="NET WT 500 g", confidence=0.99)],
+    )
+
+    with patch("ocr.factory.get_ocr_provider", return_value=mock_provider):
+        exit_code, summary = run_smoke_ocr(dummy_image_file, live_provider_call=True)
+        assert exit_code == 0
+
+    # Assert count invariant
+    assert db.query(Inspection).count() == insp_count_before
+    assert db.query(Scan).count() == scan_count_before
+    assert db.query(Finding).count() == find_count_before
+    assert db.query(ScanImage).count() == img_count_before
 
 
 def test_cli_main_entrypoint(dummy_image_file, capsys):

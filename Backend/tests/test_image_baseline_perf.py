@@ -18,13 +18,34 @@ from PIL import Image, ImageDraw
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from unittest.mock import patch
 
 from database import Base, get_db
 from main import app
 from models import Finding, Inspection, Scan, ScanImage, Store, User
+from ocr.base import OcrLine, OcrResult, STATUS_SUCCESS
 from password_handler import hash_password
 from perf_baseline import get_latest_benchmarks, get_process_memory_mb
 from rbac import get_current_user, require_inspector
+
+
+def _create_benchmark_ocr_result() -> OcrResult:
+    """Deterministic OCR mock result for performance benchmarks, isolating local CV and rule pipelines."""
+    return OcrResult(
+        lines=[
+            OcrLine(text="ROYAL FEAST BASMATI RICE", confidence=0.98, box=[[10.0, 10.0], [300.0, 10.0], [300.0, 40.0], [10.0, 40.0]]),
+            OcrLine(text="NET QTY: 1 kg", confidence=0.99, box=[[10.0, 50.0], [200.0, 50.0], [200.0, 80.0], [10.0, 80.0]]),
+            OcrLine(text="MRP Rs. 120.00 (INCL. OF ALL TAXES)", confidence=0.97, box=[[10.0, 90.0], [400.0, 90.0], [400.0, 120.0], [10.0, 120.0]]),
+            OcrLine(text="MFG DATE: 01/2026 BATCH NO: B-2026-X", confidence=0.95, box=[[10.0, 130.0], [450.0, 130.0], [450.0, 160.0], [10.0, 160.0]]),
+            OcrLine(text="MFR: ROYAL FOODS PVT LTD HYDERABAD", confidence=0.96, box=[[10.0, 170.0], [500.0, 170.0], [500.0, 200.0], [10.0, 200.0]]),
+            OcrLine(text="CONSUMER CARE: 1800-111-2222 care@royal.test", confidence=0.95, box=[[10.0, 210.0], [520.0, 210.0], [520.0, 240.0], [10.0, 240.0]]),
+            OcrLine(text="COUNTRY OF ORIGIN: INDIA", confidence=0.98, box=[[10.0, 250.0], [350.0, 250.0], [350.0, 280.0], [10.0, 280.0]]),
+        ],
+        engine="google_vision",
+        provider="google_vision",
+        status=STATUS_SUCCESS,
+        mean_confidence=0.97,
+    )
 
 
 def _create_synthetic_label_image(width=1600, height=1200, text="BASMATI RICE NET QTY 1 kg MRP Rs 120.00") -> bytes:
@@ -254,9 +275,10 @@ def test_baseline_assessment_benchmarks(test_env):
     )
     assert r_up.status_code == 201
 
-    # Run assess
+    # Run assess with deterministic OCR boundary to isolate local CV & rule pipeline latency
     t0 = time.perf_counter()
-    r_assess = client.post(f"/scans/{scan_id}/assess")
+    with patch("ocr_engine.run_ocr", return_value=_create_benchmark_ocr_result()):
+        r_assess = client.post(f"/scans/{scan_id}/assess")
     assess_total_ms = (time.perf_counter() - t0) * 1000
     assert r_assess.status_code == 200, r_assess.text
 
@@ -305,26 +327,7 @@ def test_baseline_reassessment_cache_reuse_latency(test_env):
     )
     assert r_up.status_code == 201
 
-    from unittest.mock import patch
-    from ocr.base import OcrLine, OcrResult, STATUS_SUCCESS
-
-    mock_res = OcrResult(
-        lines=[
-            OcrLine(text="ROYAL FEAST BASMATI RICE", confidence=0.98, box=[[10.0, 10.0], [300.0, 10.0], [300.0, 40.0], [10.0, 40.0]]),
-            OcrLine(text="NET QTY: 1 kg", confidence=0.99, box=[[10.0, 50.0], [200.0, 50.0], [200.0, 80.0], [10.0, 80.0]]),
-            OcrLine(text="MRP Rs. 120.00 (INCL. OF ALL TAXES)", confidence=0.97, box=[[10.0, 90.0], [400.0, 90.0], [400.0, 120.0], [10.0, 120.0]]),
-            OcrLine(text="MFG DATE: 01/2026 BATCH NO: B-2026-X", confidence=0.95, box=[[10.0, 130.0], [450.0, 130.0], [450.0, 160.0], [10.0, 160.0]]),
-            OcrLine(text="MFR: ROYAL FOODS PVT LTD HYDERABAD", confidence=0.96, box=[[10.0, 170.0], [500.0, 170.0], [500.0, 200.0], [10.0, 200.0]]),
-            OcrLine(text="CONSUMER CARE: 1800-111-2222 care@royal.test", confidence=0.95, box=[[10.0, 210.0], [520.0, 210.0], [520.0, 240.0], [10.0, 240.0]]),
-            OcrLine(text="COUNTRY OF ORIGIN: INDIA", confidence=0.98, box=[[10.0, 250.0], [350.0, 250.0], [350.0, 280.0], [10.0, 280.0]]),
-        ],
-        engine="google_vision",
-        provider="google_vision",
-        status=STATUS_SUCCESS,
-        mean_confidence=0.97,
-    )
-
-    with patch("ocr_engine.run_ocr", return_value=mock_res):
+    with patch("ocr_engine.run_ocr", return_value=_create_benchmark_ocr_result()):
         # First assess (initial fresh evaluation)
         t0_fresh = time.perf_counter()
         r_fresh = client.post(f"/scans/{scan_id}/assess")

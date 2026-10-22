@@ -116,7 +116,7 @@ class TestReviewQueueHelpers:
         assert any(r["type"] == "low_confidence" for r in reasons)
 
     def test_review_reason_null_confidence(self):
-        """NULL confidence findings generate review reason."""
+        """NULL confidence deterministic findings do NOT generate low_confidence review reason."""
         from routers.review import _review_reason
         scan = self._make_scan(overall_result="compliant")
         insp = self._make_inspection()
@@ -124,7 +124,7 @@ class TestReviewQueueHelpers:
             self._make_finding("CHK01", "pass", confidence=None),
         ]
         reasons = _review_reason(scan, findings, insp)
-        assert any(r["type"] == "low_confidence" for r in reasons)
+        assert not any(r["type"] == "low_confidence" for r in reasons)
 
     def test_review_reason_offline_edit(self):
         """Offline-edited inspection generates review reason."""

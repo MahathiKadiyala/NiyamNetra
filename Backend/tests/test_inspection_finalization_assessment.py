@@ -37,6 +37,7 @@ from database import Base, get_db
 import models
 from models import AuditLog, Finding, Inspection, Scan, ScanImage, Store, User
 from main import app
+from ocr.base import OcrLine, OcrResult, STATUS_SUCCESS
 from password_handler import hash_password
 from rbac import get_current_user, require_admin, require_inspector
 from routers.scans import (
@@ -258,7 +259,20 @@ def test_finalize_inspection_reuses_current_fresh_assessment(test_setup):
     db.commit()
 
     # Pre-assess scan before finalization
-    assess_resp = client.post(f"/scans/{scan.id}/assess")
+    mock_lines = [
+        OcrLine(text="SURF EXCEL DETERGENT", confidence=0.95, box=[[10, 10], [100, 10], [100, 30], [10, 30]], height_px=14.0),
+        OcrLine(text="NET QTY 1 kg", confidence=0.96, box=[[10, 40], [80, 40], [80, 60], [10, 60]], height_px=12.0),
+        OcrLine(text="MRP Rs. 140.00", confidence=0.97, box=[[10, 70], [90, 70], [90, 90], [10, 90]], height_px=12.0),
+    ]
+    mock_ocr = OcrResult(
+        lines=mock_lines,
+        engine="mock_engine",
+        mean_confidence=0.96,
+        failure_reason=None,
+        status=STATUS_SUCCESS,
+    )
+    with patch("ocr_engine.run_ocr", return_value=mock_ocr):
+        assess_resp = client.post(f"/scans/{scan.id}/assess")
     assert assess_resp.status_code == 200
 
     # Verify fingerprint cached

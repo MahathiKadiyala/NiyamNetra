@@ -30,6 +30,17 @@ async def lifespan(app: FastAPI):
             logger.info(f"[OCR] Cloud OCR architecture active. Configured provider: '{provider.name}'. 0MB local model RAM.")
         except Exception as e:
             logger.info(f"[OCR] Provider selector note: {e}.")
+
+    from database import _is_using_sqlite, SessionLocal
+    if _is_using_sqlite:
+        try:
+            from seed import seed_users, seed_stores
+            with SessionLocal() as db:
+                seed_users(db)
+                seed_stores(db)
+        except Exception as seed_err:
+            import logging
+            logging.getLogger("niyamnetra").warning("Startup seed notice: %s", seed_err)
     yield
 
 
@@ -42,20 +53,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
-
-
-@app.on_event("startup")
-def on_startup():
-    from database import _is_using_sqlite, SessionLocal
-    if _is_using_sqlite:
-        try:
-            from seed import seed_users, seed_stores
-            with SessionLocal() as db:
-                seed_users(db)
-                seed_stores(db)
-        except Exception as seed_err:
-            import logging
-            logging.getLogger("niyamnetra").warning("Startup seed notice: %s", seed_err)
 
 
 # A regex. Starlette matches allow_origins by exact string equality, so an

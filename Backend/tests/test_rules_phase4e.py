@@ -709,8 +709,23 @@ def test_zero_external_ai_or_network_calls_during_evaluation():
 # ---------------------------------------------------------------------------
 
 def test_performance_and_memory_within_render_budget():
-    """Verify performance metrics and peak RSS remains comfortably below Render's 512 MB ceiling."""
-    bench = benchmark_phase4_end_to_end(iterations=20)
+    """Verify performance metrics and peak RSS remains comfortably below Render's 512 MB ceiling.
+
+    The benchmark measures process-lifetime peak RSS against Render's 512 MB container ceiling.
+    Executing in an isolated subprocess ensures total process peak RSS reflects the rules-engine
+    workload rather than cumulative memory from preceding full-suite test allocations.
+    """
+    import json
+    import subprocess
+    import sys
+
+    cmd = [
+        sys.executable,
+        "-c",
+        "import json; from rules.benchmark import benchmark_phase4_end_to_end; print(json.dumps(benchmark_phase4_end_to_end(iterations=20)))",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    bench = json.loads(res.stdout)
 
     assert bench["render_compliant"] is True
     assert bench["peak_rss_mb"] < 512.0

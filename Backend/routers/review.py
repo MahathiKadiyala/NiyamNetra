@@ -322,7 +322,7 @@ def get_review_queue(
     norm_reason = reason.strip().lower() if reason else None
     if norm_reason and norm_reason not in VALID_REASONS:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid reason '{reason}'. Allowed values: not_assessed, violation, low_confidence, offline_edit, conflict, all",
         )
 
@@ -330,7 +330,7 @@ def get_review_queue(
     norm_subtype = raw_subtype.strip().lower() if raw_subtype else None
     if norm_subtype and norm_subtype not in VALID_SUBTYPES:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"Invalid subtype '{raw_subtype}'. Allowed values: "
                 "technical_recovery, recapture_required, incomplete_coverage, "
@@ -343,7 +343,7 @@ def get_review_queue(
         allowed_for_reason = REASON_SUBTYPE_COMPATIBILITY.get(norm_reason, set())
         if norm_subtype not in allowed_for_reason:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"Incompatible filter combination: reason='{reason}' cannot be combined with "
                     f"subtype='{raw_subtype}'. Compatible subtypes for reason='{norm_reason}': "
@@ -815,7 +815,7 @@ def adjudicate_review_root(
 ):
     """Direct alias endpoint for /review/adjudicate with inspection_id in body."""
     if body.inspection_id is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="inspection_id required in request body")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="inspection_id required in request body")
     return adjudicate_review(inspection_id=body.inspection_id, body=body, user=user, db=db)
 
 
@@ -863,7 +863,7 @@ def resolve_conflict_root(
 ):
     """Direct alias endpoint for /review/resolve-conflict with inspection_id in body."""
     if body.inspection_id is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="inspection_id required in request body")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="inspection_id required in request body")
     return resolve_conflict(inspection_id=body.inspection_id, conflict_id=body.conflict_id, body=body, user=user, db=db)
 
 
