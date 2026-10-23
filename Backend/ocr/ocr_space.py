@@ -150,11 +150,18 @@ class OCRSpaceProvider(BaseOCRProvider):
             msg = body.get("ErrorMessage") or body.get("ErrorDetails") or "Unknown OCR.space processing error"
             if isinstance(msg, list):
                 msg = "; ".join(str(m) for m in msg)
+            clean_msg = sanitize_sensitive_text(str(msg))
+            status = STATUS_PROVIDER_ERROR
+            lower_msg = clean_msg.lower()
+            if any(term in lower_msg for term in ("apikey", "api key", "unauthorized", "invalid key")):
+                status = STATUS_AUTH_ERROR
+            elif any(term in lower_msg for term in ("rate limit", "limit reached", "too many")):
+                status = STATUS_RATE_LIMITED
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
-                status=STATUS_PROVIDER_ERROR,
-                failure_reason=f"OCR.space processing error: {msg}",
+                status=status,
+                failure_reason=f"OCR.space processing error: {clean_msg}",
                 duration_ms=duration_ms,
             )
 

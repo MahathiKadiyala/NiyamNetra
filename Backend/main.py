@@ -133,7 +133,7 @@ async def global_exception_handler(_r: Request, exc: Exception):
         )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "traceback": raw_tb},
+        content={"detail": sanitized_exc, "traceback": sanitized_tb},
     )
 
 
@@ -152,6 +152,7 @@ def health():
     import hashlib
     import shutil
     from rules.loader import load_rule_pack, RULE_PACK_2026_09_FILE
+    from ocr.security import sanitize_sensitive_text
 
     pack = load_rule_pack(settings.RULE_PACK_VERSION)
     cat_hash = hashlib.sha256(RULE_PACK_2026_09_FILE.read_bytes()).hexdigest()
@@ -168,11 +169,23 @@ def health():
             db.execute(text("SELECT 1"))
     except Exception as e:
         db_status = "error"
-        db_error = str(e)
+        db_error = sanitize_sensitive_text(str(e))
     try:
         free_gb = shutil.disk_usage(settings.EVIDENCE_DIR).free / (1024 ** 3)
     except Exception:
         free_gb = None
+
+    try:
+        from ocr.diagnostics import get_ocr_health_diagnostics
+        ocr_diag = get_ocr_health_diagnostics()
+    except Exception as diag_err:
+        ocr_diag = {
+            "configured": False,
+            "readiness": "unconfigured",
+            "verification_status": "error",
+            "live_verified": False,
+            "error": sanitize_sensitive_text(str(diag_err)),
+        }
 
     return {
         "status": "ok",
@@ -193,4 +206,5 @@ def health():
         "db_error": db_error,
         "evidence_free_gb": round(free_gb, 2) if free_gb is not None else None,
         "evidence_low": free_gb is not None and free_gb < settings.EVIDENCE_MIN_FREE_GB,
+        "ocr": ocr_diag,
     }

@@ -12,12 +12,25 @@ from typing import Any
 
 # Regex patterns matching common credential formats and parameters
 _SECRET_PATTERNS = [
-    re.compile(r"(?i)(?:key|apikey|api_key|secret|token|password)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
-    re.compile(r"(?i)bearer\s+([a-zA-Z0-9_\-\.]{8,})"),
-    re.compile(r"AIza[0-9A-Za-z\-_]{35}"),
-    re.compile(r"(?i)(?:Ocp-Apim-Subscription-Key)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
-    re.compile(r"(?i)https?://[^\s]*[?&](?:key|apikey|api_key)=([a-zA-Z0-9_\-\.]{6,})"),
-    re.compile(r"://[^:]*:([^@\s]{4,})@"),
+    # Parameterized keys/tokens: key=value, key: value, key "value", key 'value', key value
+    re.compile(r"(?i)(?:key|apikey|api_key|secret|token|password)\s*[:=\s]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+    # Bearer tokens
+    re.compile(r"(?i)(?:bearer\s+)([a-zA-Z0-9_\-\.]{8,})"),
+    # Authorization header
+    re.compile(r"(?i)(?:authorization\s*[:=\s]\s*['\"]?(?:bearer\s+)?)['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+    # Google API Key format
+    re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"),
+    # Google API Key in headers
+    re.compile(r"(?i)(?:x-goog-api-key)\s*[:=\s]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+    # OCR.space API Key format (e.g. K89123456789012)
+    re.compile(r"\bK\d{8,}[a-zA-Z0-9]*\b"),
+    # Azure Vision Key (Ocp-Apim-Subscription-Key or 32-hex key)
+    re.compile(r"(?i)(?:ocp-apim-subscription-key|subscription[_-]?key)\s*[:=\s]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+    re.compile(r"(?i)(?:azure[_-]?vision[_-]?key)\s*[:=\s]\s*['\"]?([a-fA-F0-9]{32})['\"]?"),
+    # URL query parameter keys
+    re.compile(r"(?i)([?&](?:key|apikey|api_key|token|subscription-key)=)[^&\s'\"]+"),
+    # Basic auth in URLs: ://user:password@host
+    re.compile(r"://([^:]*):([^@\s]{4,})@"),
 ]
 
 
@@ -66,9 +79,35 @@ def sanitize_sensitive_text(text: str | None) -> str | None:
         def _repl(m: re.Match) -> str:
             full = m.group(0)
             if m.lastindex:
-                secret_val = m.group(1)
+                if m.lastindex == 2 and "://" in full and "@" in full:
+                    return f"://{m.group(1)}:[REDACTED]@"
+                if full.startswith(("?", "&")) and m.group(1):
+                    return f"{m.group(1)}[REDACTED]"
+                secret_val = m.group(m.lastindex)
                 return full.replace(secret_val, "[REDACTED]")
             return "[REDACTED]"
         sanitized = pat.sub(_repl, sanitized)
 
     return sanitized
+
+
+def sanitize_diagnostic_data(data: Any) -> Any:
+    """Recursively scrub sensitive text from dictionaries, lists, and primitives."""
+    if data is None:
+        return None
+    if isinstance(data, str):
+        return sanitize_sensitive_text(data)
+    if isinstance(data, dict):
+        sanitized_dict = {}
+        for k, v in data.items():
+            k_lower = str(k).lower()
+            if any(s in k_lower for s in ("key", "secret", "token", "password", "credential", "auth_header")):
+                sanitized_dict[k] = "[REDACTED]" if v else v
+            else:
+                sanitized_dict[k] = sanitize_diagnostic_data(v)
+        return sanitized_dict
+    if isinstance(data, list):
+        return [sanitize_diagnostic_data(item) for item in data]
+    if isinstance(data, tuple):
+        return tuple(sanitize_diagnostic_data(item) for item in data)
+    return data

@@ -20,6 +20,7 @@ from ocr.base import (
     OcrResult,
     OcrWord,
     STATUS_AUTH_ERROR,
+    STATUS_BILLING_ERROR,
     STATUS_INVALID_RESPONSE,
     STATUS_NO_TEXT,
     STATUS_PROVIDER_ERROR,
@@ -106,8 +107,12 @@ class GoogleVisionProvider(BaseOCRProvider):
             except Exception:
                 pass
 
+            lower_msg = (msg or "").lower()
             if code in (401, 403):
-                status = STATUS_AUTH_ERROR
+                if any(term in lower_msg for term in ("billing", "quota", "project has been suspended", "credit", "payment")):
+                    status = STATUS_BILLING_ERROR
+                else:
+                    status = STATUS_AUTH_ERROR
             elif code == 429:
                 status = STATUS_RATE_LIMITED
 
@@ -143,11 +148,18 @@ class GoogleVisionProvider(BaseOCRProvider):
         first = responses[0] if responses else {}
         if first.get("error"):
             msg = (first["error"] or {}).get("message", "Unknown Vision error")
+            clean_msg = sanitize_sensitive_text(msg)
+            lower_msg = clean_msg.lower()
+            status = STATUS_PROVIDER_ERROR
+            if any(term in lower_msg for term in ("billing", "quota", "project has been suspended", "credit", "payment")):
+                status = STATUS_BILLING_ERROR
+            elif any(term in lower_msg for term in ("permission", "unauthorized", "api key", "forbidden", "disabled")):
+                status = STATUS_AUTH_ERROR
             return OcrResult(
                 engine=self.name,
                 provider=self.name,
-                status=STATUS_PROVIDER_ERROR,
-                failure_reason=f"Google Vision API error: {msg}",
+                status=status,
+                failure_reason=f"Google Vision API error: {clean_msg}",
                 duration_ms=duration_ms,
             )
 

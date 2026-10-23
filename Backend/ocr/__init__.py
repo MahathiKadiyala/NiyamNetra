@@ -7,6 +7,7 @@ from ocr.base import (
     OcrResult,
     OcrWord,
     STATUS_AUTH_ERROR,
+    STATUS_BILLING_ERROR,
     STATUS_INPUT_UNAVAILABLE,
     STATUS_INVALID_RESPONSE,
     STATUS_NO_TEXT,
@@ -17,11 +18,12 @@ from ocr.base import (
     STATUS_TIMEOUT,
     STATUS_UNAVAILABLE,
 )
+from ocr.diagnostics import get_ocr_health_diagnostics, reset_diagnostic_records
 from ocr.fallback import FallbackOCRProvider
 from ocr.factory import get_candidate_providers, get_ocr_provider
 from ocr.google_vision import GoogleVisionProvider
 from ocr.ocr_space import OCRSpaceProvider
-from ocr.security import sanitize_sensitive_text
+from ocr.security import sanitize_diagnostic_data, sanitize_sensitive_text
 
 __all__ = [
     "BaseOCRProvider",
@@ -32,6 +34,9 @@ __all__ = [
     "get_ocr_provider",
     "get_candidate_providers",
     "sanitize_sensitive_text",
+    "sanitize_diagnostic_data",
+    "get_ocr_health_diagnostics",
+    "reset_diagnostic_records",
     "OcrLine",
     "OcrResult",
     "OcrBlock",
@@ -42,6 +47,7 @@ __all__ = [
     "STATUS_RATE_LIMITED",
     "STATUS_PROVIDER_ERROR",
     "STATUS_AUTH_ERROR",
+    "STATUS_BILLING_ERROR",
     "STATUS_INVALID_RESPONSE",
     "STATUS_NO_TEXT",
     "STATUS_UNAVAILABLE",

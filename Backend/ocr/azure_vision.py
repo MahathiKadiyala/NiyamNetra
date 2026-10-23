@@ -18,6 +18,7 @@ from ocr.base import (
     OcrResult,
     OcrWord,
     STATUS_AUTH_ERROR,
+    STATUS_BILLING_ERROR,
     STATUS_NO_TEXT,
     STATUS_PROVIDER_ERROR,
     STATUS_RATE_LIMITED,
@@ -86,12 +87,21 @@ class AzureVisionProvider(BaseOCRProvider):
             )
         except httpx.HTTPStatusError as e:
             code = e.response.status_code
-            status = STATUS_PROVIDER_ERROR
+            msg = str(e)
+            try:
+                err_body = e.response.json().get("error", {})
+                msg = err_body.get("message", msg)
+            except Exception:
+                pass
+            lower_msg = (msg or "").lower()
             if code in (401, 403):
-                status = STATUS_AUTH_ERROR
+                if any(term in lower_msg for term in ("billing", "quota", "out of quota", "credit", "payment")):
+                    status = STATUS_BILLING_ERROR
+                else:
+                    status = STATUS_AUTH_ERROR
             elif code == 429:
                 status = STATUS_RATE_LIMITED
-            clean_msg = sanitize_sensitive_text(str(e))
+            clean_msg = sanitize_sensitive_text(msg)
             return OcrResult(
                 engine=self.name,
                 provider=self.name,

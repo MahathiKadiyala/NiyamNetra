@@ -22,6 +22,7 @@ from ocr.base import (
     BaseOCRProvider,
     OcrResult,
     STATUS_AUTH_ERROR,
+    STATUS_BILLING_ERROR,
     STATUS_INVALID_RESPONSE,
     STATUS_NO_TEXT,
     STATUS_PROVIDER_ERROR,
@@ -38,6 +39,7 @@ logger = logging.getLogger("niyamnetra.ocr.fallback")
 # Statuses that trigger runtime fallback to next configured provider
 FALLBACK_TRIGGER_STATUSES = {
     STATUS_AUTH_ERROR,        # HTTP 401, 403, billing disabled
+    STATUS_BILLING_ERROR,     # Explicit billing / quota exhaustion
     STATUS_TIMEOUT,           # Network / HTTP timeout
     STATUS_RATE_LIMITED,      # HTTP 429
     STATUS_PROVIDER_ERROR,    # HTTP 5xx, connection drop, server crash
@@ -46,10 +48,11 @@ FALLBACK_TRIGGER_STATUSES = {
 }
 
 
-def _status_to_category(status: str) -> str:
+def _status_to_category(status: str, failure_reason: str | None = None) -> str:
     categories = {
         STATUS_SUCCESS: "success",
         STATUS_AUTH_ERROR: "auth_error",
+        STATUS_BILLING_ERROR: "billing_error",
         STATUS_TIMEOUT: "timeout",
         STATUS_RATE_LIMITED: "rate_limited",
         STATUS_PROVIDER_ERROR: "provider_error",
@@ -58,7 +61,15 @@ def _status_to_category(status: str) -> str:
         STATUS_UNAVAILABLE: "unavailable",
         STATUS_SKIPPED: "skipped_unconfigured",
     }
-    return categories.get(status, "unknown")
+    if status in categories:
+        return categories[status]
+    if failure_reason:
+        r_lower = failure_reason.lower()
+        if any(w in r_lower for w in ("billing", "billable", "quota", "credit")):
+            return "billing_error"
+        if any(w in r_lower for w in ("network", "connection", "connect")):
+            return "network_error"
+    return "unknown"
 
 
 class FallbackOCRProvider(BaseOCRProvider):
@@ -141,10 +152,11 @@ class FallbackOCRProvider(BaseOCRProvider):
             if result.failure_reason:
                 result.failure_reason = sanitize_sensitive_text(result.failure_reason)
 
+            cand_cat = _status_to_category(result.status, result.failure_reason)
             attempt_entry = {
                 "provider": candidate.name,
                 "status": result.status,
-                "category": _status_to_category(result.status),
+                "category": cand_cat,
                 "duration_ms": result.duration_ms,
                 "failure_reason": result.failure_reason,
             }
@@ -152,6 +164,11 @@ class FallbackOCRProvider(BaseOCRProvider):
 
             # 3. Success check
             if result.status == STATUS_SUCCESS:
+                try:
+                    from ocr.diagnostics import record_provider_success
+                    record_provider_success(candidate.name, result.duration_ms, len(result.lines))
+                except Exception:
+                    pass
                 result.attempts = attempts
                 result.duration_ms = round((time.perf_counter() - t0_total) * 1000, 2)
                 logger.info(
@@ -165,6 +182,11 @@ class FallbackOCRProvider(BaseOCRProvider):
 
             # 4. Valid no-text check
             if result.status == STATUS_NO_TEXT:
+                try:
+                    from ocr.diagnostics import record_provider_success
+                    record_provider_success(candidate.name, result.duration_ms, 0)
+                except Exception:
+                    pass
                 result.attempts = attempts
                 result.duration_ms = round((time.perf_counter() - t0_total) * 1000, 2)
                 logger.info(
@@ -173,6 +195,14 @@ class FallbackOCRProvider(BaseOCRProvider):
                     result.duration_ms,
                 )
                 return result
+
+            # Record failure in telemetry
+            try:
+                from ocr.diagnostics import record_provider_failure, record_provider_fallback
+                record_provider_failure(candidate.name, result.status, cand_cat, result.failure_reason, result.duration_ms)
+                record_provider_fallback(candidate.name, "fallback_candidate", result.duration_ms)
+            except Exception:
+                pass
 
             # 5. Runtime failure eligible for fallback
             if result.status in FALLBACK_TRIGGER_STATUSES:
@@ -200,7 +230,7 @@ class FallbackOCRProvider(BaseOCRProvider):
                 for a in invoked_attempts
             ]
             failure_summary = f"All OCR providers failed: {'; '.join(summary_parts)}"
-            if any(a["status"] == STATUS_AUTH_ERROR for a in invoked_attempts):
+            if any(a["status"] in (STATUS_AUTH_ERROR, STATUS_BILLING_ERROR) for a in invoked_attempts):
                 overall_status = STATUS_AUTH_ERROR
             elif any(a["status"] == STATUS_TIMEOUT for a in invoked_attempts):
                 overall_status = STATUS_TIMEOUT
@@ -208,6 +238,12 @@ class FallbackOCRProvider(BaseOCRProvider):
                 overall_status = STATUS_RATE_LIMITED
             else:
                 overall_status = STATUS_PROVIDER_ERROR
+
+        try:
+            from ocr.diagnostics import record_provider_failure
+            record_provider_failure("chain", overall_status, "all_failed", failure_summary, total_dur)
+        except Exception:
+            pass
 
         logger.error("[OCR] %s (duration=%.2fms)", failure_summary, total_dur)
         return OcrResult(

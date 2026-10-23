@@ -52,8 +52,9 @@ def get_ocr_provider(provider_name: str | None = None) -> BaseOCRProvider:
         return OCRSpaceProvider()
     if name in ("azure", "azure_vision", "azure-vision"):
         return AzureVisionProvider()
-    if name in ("fallback", "composite"):
+    if name in ("fallback", "composite", "auto", "default"):
         return FallbackOCRProvider(candidates=get_candidate_providers())
 
-    # "auto" -> Resilient Fallback Chain
-    return FallbackOCRProvider(candidates=get_candidate_providers())
+    raise ValueError(
+        f"Unsupported OCR provider '{name}'. Supported providers: auto, google_vision, ocr_space, azure"
+    )
