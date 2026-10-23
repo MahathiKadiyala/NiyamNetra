@@ -234,41 +234,21 @@ export const STATUTORY_CHECKS_MASTER = [
   },
 ];
 
-export function formatFinding(f, idx = 0) {
-  if (!f) return null;
-  const srvId = typeof f.id === 'number' && f.id > 0 ? f.id : (typeof f.server_id === 'number' && f.server_id > 0 ? f.server_id : null);
-  const checkId = f.check_id || f.code || f.rule_id || `CHK${String(idx + 1).padStart(2, '0')}`;
-  const effective = f.effective_verdict || f.human_verdict || f.engine_verdict || f.verdict || f.finding_status || 'not_assessed';
-  const engine = f.engine_verdict || f.verdict || 'not_assessed';
-  const isFail = effective === 'fail' || effective === 'violation';
+import {
+  ASSESSMENT_STATE,
+  deriveAssessmentState,
+  formatFinding,
+  formatFindings,
+  computeEvidenceFingerprint,
+} from '../../config/assessmentWorkflow';
 
-  return {
-    id: f.id || idx + 1,
-    server_id: srvId,
-    check_id: checkId,
-    rule_id: f.rule_id || checkId,
-    title: f.title || f.name || f.rule_title || checkId,
-    citation: f.citation || f.statutory_reference || f.source_rule || 'Legal Metrology (Packaged Commodities) Rules, 2011',
-    engine_verdict: engine,
-    effective_verdict: effective,
-    human_verdict: f.human_verdict || null,
-    override_reason: f.override_reason || null,
-    observed: f.observed || 'No declaration observed on packaging',
-    required: f.required || 'Statutory declaration required under Legal Metrology Rules',
-    severity: f.severity || 'critical',
-    reason: f.reason || f.explanation || null,
-    remediation: f.remediation || (isFail ? 'Rectify packaging declaration to comply with statutory rule requirements' : null),
-    confidence: f.confidence,
-    evidence_references: f.evidence_references || (f.check_id ? [f.check_id] : []),
-  };
-}
-
-export function formatFindings(rawFindings) {
-  if (!Array.isArray(rawFindings) || rawFindings.length === 0) {
-    return [];
-  }
-  return rawFindings.map((f, idx) => formatFinding(f, idx)).filter(Boolean);
-}
+export {
+  ASSESSMENT_STATE,
+  deriveAssessmentState,
+  formatFinding,
+  formatFindings,
+  computeEvidenceFingerprint,
+};
 
 export function buildInitialFindings(scan) {
   if (Array.isArray(scan?.findings) && scan.findings.length > 0) {
@@ -307,12 +287,26 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const [overrideReason, setOverrideReason] = useState('');
   const [submittingOverride, setSubmittingOverride] = useState(false);
   const [reassessing, setReassessing] = useState(false);
+  const [fetchLoading, setFetchLoading] = useState(false);
+  const [requestError, setRequestError] = useState(null);
   const [verifyingEvidence, setVerifyingEvidence] = useState(false);
   const [evidenceIntegrity, setEvidenceIntegrity] = useState(null);
   const [selectedImage, setSelectedImage] = useState(null);
   const [modalLoading, setModalLoading] = useState(false);
   const [modalError, setModalError] = useState(false);
   const reassessBusyRef = useRef(false);
+  const isMountedRef = useRef(true);
+
+  const scanId = currentScan?.server_id || (typeof currentScan?.id === 'number' && currentScan.id > 0 ? currentScan.id : null) || scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
+  const activeScanIdRef = useRef(scanId);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    activeScanIdRef.current = scanId;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [scanId]);
 
   // Sync state when scan prop changes
   useEffect(() => {
@@ -323,6 +317,7 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     setSelectedImage(null);
     setModalLoading(false);
     setModalError(false);
+    setRequestError(null);
   }, [scan?.id, scan?.server_id, scan?.findings, scan?.overall_result, scan?.updated_at]);
 
   // Sync evidence images if images or photos update on scan
@@ -335,8 +330,6 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
       }));
     }
   }, [scan?.images, scan?.panelPhotos]);
-
-  const scanId = currentScan?.server_id || (typeof currentScan?.id === 'number' && currentScan.id > 0 ? currentScan.id : null) || scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
 
   const evidenceImages = useMemo(() => {
     return normalizeEvidenceList(currentScan || scan, scanId, evidenceIntegrity);
@@ -388,10 +381,11 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
       return;
     }
     let active = true;
+    setFetchLoading(true);
     (async () => {
       try {
         const fresh = await fetchScanDetails(scanId);
-        if (active && fresh) {
+        if (active && isMountedRef.current && activeScanIdRef.current === scanId && fresh) {
           setCurrentScan(fresh);
           if (Array.isArray(fresh.findings) && fresh.findings.length > 0) {
             const formatted = formatFindings(fresh.findings);
@@ -405,6 +399,10 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
         }
       } catch (e) {
         // silent fallback
+      } finally {
+        if (active && isMountedRef.current) {
+          setFetchLoading(false);
+        }
       }
     })();
     return () => { active = false; };
@@ -422,8 +420,14 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     if (reassessBusyRef.current) return;
     reassessBusyRef.current = true;
     setReassessing(true);
+    setRequestError(null);
+    const targetScanId = scanId;
+
     try {
-      const assessed = await assessScan(scanId);
+      const assessed = await assessScan(targetScanId);
+      if (!isMountedRef.current || activeScanIdRef.current !== targetScanId) {
+        return;
+      }
       if (assessed) {
         setCurrentScan(assessed);
         if (Array.isArray(assessed.findings) && assessed.findings.length > 0) {
@@ -448,11 +452,17 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
           }
         }
       }
-
     } catch (err) {
-      Alert.alert('Reassessment Error', err?.message || 'Server assessment could not be completed.');
+      if (!isMountedRef.current || activeScanIdRef.current !== targetScanId) {
+        return;
+      }
+      const errMsg = err?.response?.data?.detail || err?.message || 'Server assessment could not be completed.';
+      setRequestError(errMsg);
+      Alert.alert('Assessment Error', errMsg);
     } finally {
-      setReassessing(false);
+      if (isMountedRef.current) {
+        setReassessing(false);
+      }
       reassessBusyRef.current = false;
     }
   };
@@ -575,6 +585,14 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const catalogRuleCount = currentScan?.diagnostics?.catalog_rule_count || 26;
   const executableCheckCount = currentScan?.diagnostics?.executable_check_count || 19;
 
+  const derivedState = deriveAssessmentState({
+    currentScan,
+    findings,
+    reassessing,
+    fetchLoading,
+    requestError,
+  });
+
   // True server assessment completion status
   const hasServerAssessed = Boolean(
     currentScan?.status === 'assessed' ||
@@ -674,8 +692,8 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
           </View>
         </Card>
 
-        {/* Server Assessment Action: prominent button when awaiting; completed banner when done */}
-        {isAwaitingAssessment && (
+        {/* Authoritative Assessment State Banner */}
+        {derivedState === ASSESSMENT_STATE.AWAITING_ASSESSMENT && (
           <View style={{ marginBottom: spacing.sm }}>
             <Pressable
               onPress={handleTriggerReassess}
@@ -698,14 +716,153 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
           </View>
         )}
 
-        {hasServerAssessed && (
-          <View style={styles.assessmentCompletedBar}>
+        {derivedState === ASSESSMENT_STATE.ASSESSING && (
+          <View style={[styles.stateBanner, styles.stateBannerAssessing]}>
+            <ActivityIndicator size="small" color={colors.netraTeal} style={{ marginRight: 10 }} />
             <View style={{ flex: 1 }}>
+              <Text style={styles.stateBannerTitleAssessing}>Evaluating Statutory Checks with OCR & LLM…</Text>
+              <Text style={styles.stateBannerSub}>
+                Extracting packaging declarations and evaluating against Rule Pack {rulePackVersion} ({executableCheckCount} Algorithmic Checks)
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.REQUEST_FAILURE && (
+          <View style={[styles.stateBanner, styles.stateBannerError]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stateBannerTitleError}>⚠️ Assessment Request Interrupted</Text>
+              <Text style={styles.stateBannerSub}>
+                {requestError || 'The assessment service could not be reached. Evidence is preserved on the server.'}
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.retryPrimaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Retry assessment"
+            >
+              <Text style={styles.retryPrimaryBtnText}>🔄 Retry</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.TECHNICAL_FAILURE && (
+          <View style={[styles.stateBanner, styles.stateBannerWarning]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stateBannerTitleWarning}>
+                ⚠️ Technical OCR Extraction Incomplete
+              </Text>
+              <Text style={styles.stateBannerSubWarning}>
+                The system could not reliably read declarations from the packaging images. This is a technical processing failure, not an established legal violation.
+              </Text>
+              <Text style={[styles.stateBannerSubWarning, { marginTop: 4, fontWeight: '600' }]}>
+                Statutory declarations cannot be certified absent without readable evidence. Tap Retry or recapture panels.
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.retryWarningBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Retry assessment"
+            >
+              {reassessing ? (
+                <ActivityIndicator color="#B45309" size="small" />
+              ) : (
+                <Text style={styles.retryWarningBtnText}>🔄 Retry</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.RECAPTURE_REQUIRED && (
+          <View style={[styles.stateBanner, styles.stateBannerRecapture]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stateBannerTitleRecapture}>
+                📸 Incomplete Evidence — Recapture Required
+              </Text>
+              <Text style={styles.stateBannerSub}>
+                Mandatory declarations could not be determined due to insufficient panel coverage or image quality. Recapture affected panels to complete assessment.
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.reassessSecondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Re-run assessment"
+            >
+              {reassessing ? (
+                <ActivityIndicator color={colors.netraTeal} size="small" />
+              ) : (
+                <Text style={styles.reassessSecondaryBtnText}>🔄 Re-run</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.OFFICER_REVIEW && (
+          <View style={[styles.stateBanner, styles.stateBannerReview]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stateBannerTitleReview}>
+                ⚖️ Officer Review & Adjudication Required
+              </Text>
+              <Text style={styles.stateBannerSub}>
+                Statutory evaluation flagged findings for officer review under Section 36. Review findings below and record remarks.
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.reassessSecondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Re-run assessment"
+            >
+              {reassessing ? (
+                <ActivityIndicator color={colors.netraTeal} size="small" />
+              ) : (
+                <Text style={styles.reassessSecondaryBtnText}>🔄 Re-run</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.COMPLIANT && (
+          <View style={[styles.assessmentCompletedBar, styles.stateBannerCompliant]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
               <Text style={styles.assessmentCompletedTitle}>
                 ✓ Authoritative Server Assessment Completed
               </Text>
               <Text style={styles.assessmentCompletedSub}>
                 {findings.length} findings evaluated against Rule Pack {rulePackVersion} ({executableCheckCount} Algorithmic Checks)
+              </Text>
+            </View>
+            <Pressable
+              onPress={handleTriggerReassess}
+              disabled={reassessing}
+              style={styles.reassessSecondaryBtn}
+              accessibilityRole="button"
+              accessibilityLabel="Re-run assessment"
+            >
+              {reassessing ? (
+                <ActivityIndicator color={colors.netraTeal} size="small" />
+              ) : (
+                <Text style={styles.reassessSecondaryBtnText}>🔄 Re-run</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {derivedState === ASSESSMENT_STATE.VIOLATION && (
+          <View style={[styles.stateBanner, styles.stateBannerViolation]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stateBannerTitleViolation}>
+                ⚠️ Authoritative Assessment Completed — Violations Identified
+              </Text>
+              <Text style={styles.stateBannerSub}>
+                {findings.length} findings evaluated against Rule Pack {rulePackVersion} • {failCount} statutory violation(s) identified
               </Text>
             </View>
             <Pressable
@@ -1128,6 +1285,105 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: colors.textMuted,
     marginTop: 1,
+  },
+  stateBanner: {
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+  },
+  stateBannerCompliant: {
+    backgroundColor: colors.surface,
+    borderColor: colors.pass?.border || '#A7F3D0',
+  },
+  stateBannerViolation: {
+    backgroundColor: colors.violation?.fill || '#FEF2F2',
+    borderColor: colors.violation?.border || '#FECACA',
+  },
+  stateBannerWarning: {
+    backgroundColor: '#FFFBEB',
+    borderColor: '#FDE68A',
+  },
+  stateBannerRecapture: {
+    backgroundColor: '#F8FAFC',
+    borderColor: '#CBD5E1',
+  },
+  stateBannerReview: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+  },
+  stateBannerError: {
+    backgroundColor: colors.violation?.fill || '#FEF2F2',
+    borderColor: colors.violation?.border || '#FECACA',
+  },
+  stateBannerAssessing: {
+    backgroundColor: '#F0FDFA',
+    borderColor: '#99F6E4',
+  },
+  stateBannerTitleViolation: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.violation?.text || '#B91C1C',
+  },
+  stateBannerTitleWarning: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  stateBannerTitleRecapture: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+  },
+  stateBannerTitleReview: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1D4ED8',
+  },
+  stateBannerTitleError: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.violation?.text || '#B91C1C',
+  },
+  stateBannerTitleAssessing: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.netraTeal,
+  },
+  stateBannerSubWarning: {
+    fontSize: 10,
+    color: '#92400E',
+    marginTop: 1,
+    lineHeight: 14,
+  },
+  retryWarningBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    backgroundColor: '#FEF3C7',
+  },
+  retryWarningBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#B45309',
+  },
+  retryPrimaryBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.violation?.border || '#FECACA',
+    backgroundColor: colors.white,
+  },
+  retryPrimaryBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.violation?.text || '#B91C1C',
   },
   reassessSecondaryBtn: {
     paddingHorizontal: 8,

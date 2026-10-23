@@ -424,11 +424,18 @@ export default function InspectionSessionScreen({
           is_imported: isImported,
           is_perishable: isPerishable,
           has_sticker: hasSticker,
+          status: assessedScan.status || 'assessed',
           overall_result: assessedScan.overall_result,
           violation_limb: assessedScan.violation_limb,
           checks_assessed: assessedScan.checks_assessed,
           checks_total: assessedScan.checks_total || (Array.isArray(assessedScan.findings) ? assessedScan.findings.length : 19),
           findings: assessedScan.findings,
+          counts: assessedScan.counts,
+          diagnostics: assessedScan.diagnostics,
+          rule_pack_version: assessedScan.rule_pack_version,
+          mrp: assessedScan.mrp,
+          net_quantity_value: assessedScan.net_quantity_value,
+          net_quantity_unit: assessedScan.net_quantity_unit,
           created_at: assessedScan.created_at || new Date().toISOString(),
         };
       } else {

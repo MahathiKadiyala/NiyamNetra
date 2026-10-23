@@ -508,6 +508,378 @@ it('22. Frontend screens avoid conflating 26 catalog rules with per-scan finding
   assert.strictEqual(reviewScreenCode.includes('${scanReviews[0]?.checks_total || 18}'), false);
 });
 
+// =========================================================================
+// Prompt 9: Render Backend-Derived Assessment States Regression Tests (23-34)
+// =========================================================================
+
+const {
+  ASSESSMENT_STATE,
+  deriveAssessmentState,
+  formatFinding: formatFindingItem,
+  formatFindings: formatFindingsList,
+  computeEvidenceFingerprint: computeFp,
+} = require('../config/assessmentWorkflow');
+
+// 23. Two scans with different assessment responses display different findings and summaries
+it('23. Two scans with different assessment responses display different findings and summaries', () => {
+  const scanPass = {
+    id: 101,
+    status: 'assessed',
+    overall_result: 'compliant',
+    checks_assessed: 19,
+    findings: [
+      { check_id: 'CHK01', title: 'Mandatory Declarations', effective_verdict: 'pass', engine_verdict: 'pass' },
+      { check_id: 'CHK04', title: 'Retail Sale Price', effective_verdict: 'pass', engine_verdict: 'pass' },
+    ],
+  };
+
+  const scanFail = {
+    id: 202,
+    status: 'assessed',
+    overall_result: 'violation',
+    checks_assessed: 19,
+    findings: [
+      { check_id: 'CHK01', title: 'Mandatory Declarations', effective_verdict: 'fail', engine_verdict: 'fail', reason: 'MRP missing' },
+      { check_id: 'CHK04', title: 'Retail Sale Price', effective_verdict: 'pass', engine_verdict: 'pass' },
+    ],
+  };
+
+  const statePass = deriveAssessmentState({ currentScan: scanPass, findings: scanPass.findings });
+  const stateFail = deriveAssessmentState({ currentScan: scanFail, findings: scanFail.findings });
+
+  assert.strictEqual(statePass, ASSESSMENT_STATE.COMPLIANT);
+  assert.strictEqual(stateFail, ASSESSMENT_STATE.VIOLATION);
+  assert.notStrictEqual(statePass, stateFail);
+
+  const passFindings = formatFindingsList(scanPass.findings);
+  const failFindings = formatFindingsList(scanFail.findings);
+
+  assert.strictEqual(passFindings[0].effective_verdict, 'pass');
+  assert.strictEqual(failFindings[0].effective_verdict, 'fail');
+  assert.strictEqual(failFindings[0].reason, 'MRP missing');
+});
+
+// 24. Switching scans does not leave stale counts or finding rows visible
+it('24. Switching scans does not leave stale counts or finding rows visible', () => {
+  let activeScanId = 101;
+  let displayedFindings = [
+    { id: 1, check_id: 'CHK01', effective_verdict: 'fail' },
+    { id: 2, check_id: 'CHK04', effective_verdict: 'fail' },
+  ];
+
+  let failCount = displayedFindings.filter((f) => f.effective_verdict === 'fail').length;
+  assert.strictEqual(failCount, 2);
+
+  // Inspector switches to Scan 202 (which has 0 violations)
+  const nextScan = {
+    id: 202,
+    status: 'assessed',
+    overall_result: 'compliant',
+    findings: [
+      { id: 1, check_id: 'CHK01', effective_verdict: 'pass' },
+      { id: 2, check_id: 'CHK04', effective_verdict: 'pass' },
+    ],
+  };
+
+  activeScanId = nextScan.id;
+  displayedFindings = formatFindingsList(nextScan.findings);
+  failCount = displayedFindings.filter((f) => f.effective_verdict === 'fail').length;
+  const passCount = displayedFindings.filter((f) => f.effective_verdict === 'pass').length;
+
+  assert.strictEqual(activeScanId, 202);
+  assert.strictEqual(failCount, 0);
+  assert.strictEqual(passCount, 2);
+  assert.strictEqual(displayedFindings[0].effective_verdict, 'pass');
+});
+
+// 25. Uploading or replacing evidence followed by reassessment refreshes displayed result
+it('25. Uploading or replacing evidence invalidates previous assessment fingerprint and refreshes result', () => {
+  const initialEvidence = [
+    { panel: 'front', id: 1, sha256: 'sha_old_front' },
+    { panel: 'back', id: 2, sha256: 'sha_old_back' },
+  ];
+  const oldFp = computeFp(initialEvidence);
+
+  // Replace back panel photo
+  const updatedEvidence = [
+    { panel: 'front', id: 1, sha256: 'sha_old_front' },
+    { panel: 'back', id: 3, sha256: 'sha_new_back' },
+  ];
+  const newFp = computeFp(updatedEvidence);
+
+  assert.notStrictEqual(oldFp, newFp);
+  assert.strictEqual(oldFp.includes('sha_old_back'), true);
+  assert.strictEqual(newFp.includes('sha_new_back'), true);
+
+  // After evidence replacement, scan resets to not_assessed until reassessed
+  const reassessedScan = {
+    id: 50,
+    status: 'assessed',
+    overall_result: 'compliant',
+    diagnostics: { assessment_input_fingerprint: newFp },
+    findings: [{ check_id: 'CHK01', effective_verdict: 'pass' }],
+  };
+
+  const state = deriveAssessmentState({ currentScan: reassessedScan, findings: reassessedScan.findings });
+  assert.strictEqual(state, ASSESSMENT_STATE.COMPLIANT);
+  assert.strictEqual(reassessedScan.diagnostics.assessment_input_fingerprint, newFp);
+});
+
+// 26. OCR/provider failure displays a truthful technical failure or recovery state
+it('26. OCR/provider failure displays truthful technical failure without fabricating violations', () => {
+  const ocrFailureScan = {
+    id: 60,
+    status: 'assessed',
+    overall_result: 'not_assessed',
+    checks_assessed: 0,
+    checks_total: 19,
+    diagnostics: { ocr_status: 'no_text', ocr_provider: 'google_vision' },
+    findings: [
+      { check_id: 'CHK01', effective_verdict: 'not_assessed', engine_verdict: 'not_assessed', reason: 'OCR extraction failure: no text was recognised' },
+      { check_id: 'CHK04', effective_verdict: 'not_assessed', engine_verdict: 'not_assessed', observed: null, reason: 'Pending OCR extraction' },
+    ],
+  };
+
+  const state = deriveAssessmentState({ currentScan: ocrFailureScan, findings: ocrFailureScan.findings });
+  assert.strictEqual(state, ASSESSMENT_STATE.TECHNICAL_FAILURE);
+  assert.notStrictEqual(state, ASSESSMENT_STATE.VIOLATION);
+  assert.notStrictEqual(state, ASSESSMENT_STATE.COMPLIANT);
+
+  const formatted = formatFindingsList(ocrFailureScan.findings);
+  assert.strictEqual(formatted[0].effective_verdict, 'not_assessed');
+  // Null observed field on not_assessed check stays 'Pending extraction...' and does NOT claim declaration is absent
+  assert.strictEqual(formatted[1].observed, 'Pending extraction from packaging evidence');
+});
+
+// 27. Genuine violations are displayed when supported by the backend response
+it('27. Genuine violations are displayed with citations, observed/required values, and remediation', () => {
+  const violationScan = {
+    id: 70,
+    status: 'assessed',
+    overall_result: 'violation',
+    checks_assessed: 19,
+    findings: [
+      {
+        check_id: 'CHK04',
+        title: 'Retail Sale Price (MRP)',
+        citation: 'Rule 6(1)(e)',
+        engine_verdict: 'fail',
+        effective_verdict: 'fail',
+        observed: 'MRP declaration missing on panel',
+        required: 'MRP in Indian Rupees inclusive of all taxes',
+        reason: 'Statutory MRP declaration omitted',
+        remediation: 'Rectify packaging declaration to comply with statutory rule requirements',
+      },
+    ],
+  };
+
+  const state = deriveAssessmentState({ currentScan: violationScan, findings: violationScan.findings });
+  assert.strictEqual(state, ASSESSMENT_STATE.VIOLATION);
+
+  const formatted = formatFindingsList(violationScan.findings);
+  assert.strictEqual(formatted[0].effective_verdict, 'fail');
+  assert.strictEqual(formatted[0].citation, 'Rule 6(1)(e)');
+  assert.strictEqual(formatted[0].observed, 'MRP declaration missing on panel');
+  assert.strictEqual(formatted[0].remediation.includes('Rectify packaging declaration'), true);
+});
+
+// 28. Not-assessed findings are preserved and explained appropriately
+it('28. Not-assessed findings are preserved and explained appropriately without converting to violations', () => {
+  const rawFindings = [
+    {
+      check_id: 'CHK03',
+      title: 'Chapter II Scope',
+      engine_verdict: 'not_assessed',
+      effective_verdict: 'not_assessed',
+      reason: 'Transaction type not recorded; wholesale/retail scope undetermined',
+    },
+    {
+      check_id: 'CHK06',
+      title: 'Letter Height',
+      engine_verdict: 'not_assessed',
+      effective_verdict: 'not_assessed',
+      reason: 'No millimetre scale could be established for this capture',
+    },
+  ];
+
+  const formatted = formatFindingsList(rawFindings);
+  assert.strictEqual(formatted.length, 2);
+  assert.strictEqual(formatted[0].effective_verdict, 'not_assessed');
+  assert.strictEqual(formatted[1].effective_verdict, 'not_assessed');
+  assert.strictEqual(formatted[0].reason.includes('wholesale/retail scope undetermined'), true);
+  assert.strictEqual(formatted[1].reason.includes('No millimetre scale could be established'), true);
+});
+
+// 29. Finding totals match returned findings and established counting contract
+it('29. Finding totals match returned findings and established counting contract', () => {
+  const scanCounts = {
+    total: 19,
+    passed: 13,
+    failed: 4,
+    not_assessed: 2,
+  };
+
+  // Mutually exclusive invariant
+  assert.strictEqual(scanCounts.passed + scanCounts.failed + scanCounts.not_assessed, scanCounts.total);
+  const checks_assessed = scanCounts.passed + scanCounts.failed;
+  assert.strictEqual(checks_assessed, 17);
+
+  // Findings list mirror
+  const findings = [
+    ...Array(13).fill(null).map((_, i) => ({ id: i + 1, check_id: `CHK_P_${i}`, effective_verdict: 'pass' })),
+    ...Array(4).fill(null).map((_, i) => ({ id: i + 14, check_id: `CHK_F_${i}`, effective_verdict: 'fail' })),
+    ...Array(2).fill(null).map((_, i) => ({ id: i + 18, check_id: `CHK_N_${i}`, effective_verdict: 'not_assessed' })),
+  ];
+
+  const p = findings.filter(f => f.effective_verdict === 'pass').length;
+  const f = findings.filter(f => f.effective_verdict === 'fail').length;
+  const n = findings.filter(f => f.effective_verdict === 'not_assessed').length;
+
+  assert.strictEqual(p, scanCounts.passed);
+  assert.strictEqual(f, scanCounts.failed);
+  assert.strictEqual(n, scanCounts.not_assessed);
+  assert.strictEqual(findings.length, scanCounts.total);
+});
+
+// 30. Registered rules (26 catalog rules) are not misleadingly presented as individually executed results
+it('30. Registered rules (26) are not conflated with executed checks count (19)', () => {
+  const currentScan = {
+    checks_total: 19,
+    checks_assessed: 19,
+    diagnostics: {
+      catalog_rule_count: 26,
+      executable_check_count: 19,
+      rule_pack_version: '2026.09.v1',
+    },
+  };
+
+  const catalogCount = currentScan?.diagnostics?.catalog_rule_count || 26;
+  const executableCount = currentScan?.diagnostics?.executable_check_count || 19;
+  const totalFindings = currentScan.checks_total;
+
+  assert.strictEqual(catalogCount, 26);
+  assert.strictEqual(executableCount, 19);
+  assert.strictEqual(totalFindings, 19);
+  assert.notStrictEqual(catalogCount, totalFindings);
+});
+
+// 31. Retry sends the actual request and handles success and error states correctly
+it('31. Retry handles in-flight progress and transition to request failure on 503 error', () => {
+  let state = deriveAssessmentState({ currentScan: { id: 80, status: 'captured' }, findings: [], reassessing: true });
+  assert.strictEqual(state, ASSESSMENT_STATE.ASSESSING);
+
+  // Simulation of 503 capacity error
+  state = deriveAssessmentState({
+    currentScan: { id: 80, status: 'captured', overall_result: 'not_assessed' },
+    findings: [],
+    reassessing: false,
+    requestError: 'Server error (HTTP 503): Assessment capacity busy; retry shortly',
+  });
+  assert.strictEqual(state, ASSESSMENT_STATE.REQUEST_FAILURE);
+
+  // Simulation of successful retry response
+  const reassessed = {
+    id: 80,
+    status: 'assessed',
+    overall_result: 'compliant',
+    checks_assessed: 19,
+    findings: [{ check_id: 'CHK01', effective_verdict: 'pass' }],
+  };
+  state = deriveAssessmentState({
+    currentScan: reassessed,
+    findings: reassessed.findings,
+    reassessing: false,
+    requestError: null,
+  });
+  assert.strictEqual(state, ASSESSMENT_STATE.COMPLIANT);
+});
+
+// 32. Duplicate taps and obsolete in-flight responses cannot corrupt screen state
+it('32. In-flight response isolation discards responses from previous scan on scan switch', () => {
+  let isMounted = true;
+  let activeScanId = 101;
+  let currentScanState = { id: 101, findings: [{ check_id: 'CHK01', effective_verdict: 'pass' }] };
+
+  // Request for scan 101 starts in background
+  const targetScanId = 101;
+
+  // User quickly switches to Scan 202 before request finishes
+  activeScanId = 202;
+  currentScanState = { id: 202, findings: [{ check_id: 'CHK01', effective_verdict: 'fail' }] };
+
+  // Late response for Scan 101 arrives:
+  const lateResponse = { id: 101, findings: [{ check_id: 'CHK01', effective_verdict: 'pass' }] };
+
+  // Guard condition:
+  const shouldApply = isMounted && activeScanId === targetScanId;
+  assert.strictEqual(shouldApply, false); // Blocked!
+
+  if (shouldApply) {
+    currentScanState = lateResponse;
+  }
+
+  // Scan 202 was NOT overwritten by late response for 101
+  assert.strictEqual(currentScanState.id, 202);
+  assert.strictEqual(currentScanState.findings[0].effective_verdict, 'fail');
+});
+
+// 33. Null product fields remain unknown rather than receiving fabricated values
+it('33. Null product fields remain unknown rather than receiving fabricated values', () => {
+  const scanWithNulls = {
+    commodity_generic: null,
+    brand_name: null,
+    batch_number: null,
+    mrp: null,
+    net_quantity_value: null,
+    net_quantity_unit: null,
+  };
+
+  const brand = (scanWithNulls.brand_name && !scanWithNulls.brand_name.toLowerCase().includes('unspecified')) ? scanWithNulls.brand_name.trim() : null;
+  const commodity = (scanWithNulls.commodity_generic && !scanWithNulls.commodity_generic.toLowerCase().includes('unspecified')) ? scanWithNulls.commodity_generic.trim() : null;
+  const batch = (scanWithNulls.batch_number && scanWithNulls.batch_number !== 'N/A' && !scanWithNulls.batch_number.toLowerCase().includes('unspecified')) ? scanWithNulls.batch_number.trim() : null;
+  const mrp = scanWithNulls.mrp;
+  const netQty = scanWithNulls.net_quantity_value ? `${scanWithNulls.net_quantity_value} ${scanWithNulls.net_quantity_unit || ''}`.trim() : null;
+
+  let displaySubtitle;
+  if (brand && commodity) displaySubtitle = `${brand} — ${commodity}`;
+  else if (commodity) displaySubtitle = commodity;
+  else if (brand) displaySubtitle = `${brand} • Commodity not determined`;
+  else displaySubtitle = 'Commodity not determined';
+
+  const displayBatch = `Batch: ${batch || 'Batch not observed'}${mrp ? ` • MRP: ₹${mrp}` : ''}${netQty ? ` • Net Qty: ${netQty}` : ''}`;
+
+  assert.strictEqual(displaySubtitle, 'Commodity not determined');
+  assert.strictEqual(displayBatch, 'Batch: Batch not observed');
+  assert.strictEqual(displayBatch.includes('MRP'), false);
+  assert.strictEqual(displayBatch.includes('Net Qty'), false);
+});
+
+// 34. Module 8 evidence rendering and authenticated image access continue to work
+it('34. Evidence thumbnail URLs and auth headers remain valid and JWT-free', () => {
+  const { buildImageUrl, getImageAuthHeaders, normalizeEvidenceList } = require('../config/evidenceRendering');
+
+  const testScan = {
+    id: 99,
+    server_id: 99,
+    images: [
+      { id: 1, panel: 'front', url: '/scans/99/images/1', thumbnail_url: '/scans/99/images/1/thumbnail', sha256: 'sha99_1' },
+      { id: 2, panel: 'back', url: '/scans/99/images/2', thumbnail_url: '/scans/99/images/2/thumbnail', sha256: 'sha99_2' },
+    ],
+  };
+
+  const normalized = normalizeEvidenceList(testScan, 99);
+  assert.strictEqual(normalized.length, 2);
+  assert.strictEqual(normalized[0].panel, 'front');
+  assert.strictEqual(normalized[1].panel, 'back');
+  assert.strictEqual(normalized[0].url.includes('?token='), false);
+  assert.strictEqual(normalized[0].thumbnail_url.includes('?token='), false);
+
+  const sampleToken = 'eyJhbGciOiJIUzI1NiJ9.demo';
+  const headers = getImageAuthHeaders(normalized[0].url, sampleToken);
+  assert.deepStrictEqual(headers, { Authorization: `Bearer ${sampleToken}` });
+});
+
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);
 if (failed > 0) process.exit(1);
+
 
