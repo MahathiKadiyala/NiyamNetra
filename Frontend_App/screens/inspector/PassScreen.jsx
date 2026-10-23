@@ -6,6 +6,7 @@ import Card from '../../components/Card';
 import VerdictBadge from '../../components/VerdictBadge';
 import EmptyState from '../../components/EmptyState';
 import SegmentControl from '../../components/SegmentControl';
+import EvidenceThumbnail from '../../components/EvidenceThumbnail';
 import { fetchInspections } from '../../api/admin';
 import { API_BASE_URL } from '../../api/config';
 import { getAccessToken } from '../../api/client';
@@ -185,19 +186,18 @@ export default function PassScreen({ navigation }) {
                       {(detail.evidence_uris || detail.photos || detail.images || []).map((u, i) => {
                         const rawUri = typeof u === 'string' ? u : u?.thumbnail_url || u?.url || u?.uri || u?.file_path;
                         if (!rawUri) return null;
-                        const uri = (rawUri.startsWith('http://') || rawUri.startsWith('https://') || rawUri.startsWith('file://'))
-                          ? rawUri
-                          : `${API_BASE_URL.replace(/\/+$/, '')}/${rawUri.replace(/^\/+/, '')}`;
+                        const panel = (typeof u === 'object' && u?.panel) ? u.panel : `panel_${i + 1}`;
+                        const sha256 = typeof u === 'object' ? u?.sha256 : null;
+                        const itemKey = `pass-evidence-${detail?.id || 'item'}-${panel}-${u?.id || i}-${sha256 || rawUri}`;
                         return (
-                          <Image
-                            key={i}
-                            source={{
-                              uri,
-                              headers: (getAccessToken() && !uri.startsWith('file://'))
-                                ? { Authorization: `Bearer ${getAccessToken()}` }
-                                : undefined,
-                            }}
-                            style={{ width: 160, height: 160, borderRadius: radius.md, marginRight: spacing.sm, backgroundColor: colors.borderLight }}
+                          <EvidenceThumbnail
+                            key={itemKey}
+                            uri={rawUri}
+                            panel={panel}
+                            sha256={sha256}
+                            width={160}
+                            height={160}
+                            accessibilityLabel={`View ${panel} panel evidence`}
                           />
                         );
                       })}

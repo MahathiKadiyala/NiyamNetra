@@ -17,6 +17,7 @@ import Header from '../../components/Header';
 import Card from '../../components/Card';
 import VerdictBadge from '../../components/VerdictBadge';
 import PrimaryButton from '../../components/PrimaryButton';
+import EvidenceThumbnail, { buildImageUrl, getImageAuthHeaders, normalizeEvidenceList } from '../../components/EvidenceThumbnail';
 import { overrideFinding, assessScan, fetchScanDetails, verifyEvidence, fetchRuleInfo } from '../../api/inspections';
 import { API_BASE_URL } from '../../api/config';
 import { getAccessToken } from '../../api/client';
@@ -309,6 +310,8 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   const [verifyingEvidence, setVerifyingEvidence] = useState(false);
   const [evidenceIntegrity, setEvidenceIntegrity] = useState(null);
   const [selectedImage, setSelectedImage] = useState(null);
+  const [modalLoading, setModalLoading] = useState(false);
+  const [modalError, setModalError] = useState(false);
   const reassessBusyRef = useRef(false);
 
   // Sync state when scan prop changes
@@ -318,81 +321,25 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     setEvidenceIntegrity(null);
     setSelectedFinding(null);
     setSelectedImage(null);
+    setModalLoading(false);
+    setModalError(false);
   }, [scan?.id, scan?.server_id, scan?.findings, scan?.overall_result, scan?.updated_at]);
+
+  // Sync evidence images if images or photos update on scan
+  useEffect(() => {
+    if (scan?.images || scan?.panelPhotos) {
+      setCurrentScan((prev) => ({
+        ...prev,
+        images: scan?.images || prev?.images,
+        panelPhotos: scan?.panelPhotos || prev?.panelPhotos,
+      }));
+    }
+  }, [scan?.images, scan?.panelPhotos]);
 
   const scanId = currentScan?.server_id || (typeof currentScan?.id === 'number' && currentScan.id > 0 ? currentScan.id : null) || scan?.server_id || (typeof scan?.id === 'number' && scan.id > 0 ? scan.id : null);
 
   const evidenceImages = useMemo(() => {
-    const list = [];
-    const sourceImages = currentScan?.images || scan?.images;
-    const token = getAccessToken();
-
-    const buildImageUrl = (u) => {
-      if (!u) return null;
-      return (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('file://'))
-        ? u
-        : `${API_BASE_URL.replace(/\/+$/, '')}/${u.replace(/^\/+/, '')}`;
-    };
-
-    if (Array.isArray(sourceImages) && sourceImages.length > 0) {
-      // Canonical panel sorting: front, back, mrp, batch, side, other
-      const panelOrder = { front: 1, back: 2, mrp: 3, batch: 4, side: 5, other: 6 };
-      const sorted = [...sourceImages].sort((a, b) => {
-        const orderA = panelOrder[a.panel?.toLowerCase()] || 99;
-        const orderB = panelOrder[b.panel?.toLowerCase()] || 99;
-        return orderA - orderB || (a.sequence || 0) - (b.sequence || 0);
-      });
-
-      sorted.forEach((img, i) => {
-        let rawUrl = img.url || (img.id && scanId ? `/scans/${scanId}/images/${img.id}` : null);
-        let rawThumbUrl = img.thumbnail_url || (img.id && scanId ? `/scans/${scanId}/images/${img.id}/thumbnail` : rawUrl);
-
-        list.push({
-          id: img.id ?? i,
-          panel: img.panel || `panel_${i + 1}`,
-          url: buildImageUrl(rawUrl),
-          thumbnail_url: buildImageUrl(rawThumbUrl),
-          sha256: img.sha256 || null,
-        });
-      });
-    } else if (currentScan?.panelPhotos || scan?.panelPhotos) {
-      const photos = currentScan?.panelPhotos || scan?.panelPhotos;
-      const canonicalPanels = ['front', 'back', 'mrp', 'batch'];
-      canonicalPanels.forEach((p, i) => {
-        const uri = photos[p];
-        if (uri) {
-          list.push({
-            id: `local-${p}`,
-            panel: p,
-            url: uri,
-            thumbnail_url: uri,
-            sha256: null,
-          });
-        }
-      });
-      Object.entries(photos).forEach(([p, uri]) => {
-        if (uri && !canonicalPanels.includes(p)) {
-          list.push({
-            id: `local-${p}`,
-            panel: p,
-            url: uri,
-            thumbnail_url: uri,
-            sha256: null,
-          });
-        }
-      });
-    } else if (evidenceIntegrity?.images && Array.isArray(evidenceIntegrity.images)) {
-      evidenceIntegrity.images.forEach((img, i) => {
-        list.push({
-          id: img.image_id || i,
-          panel: img.panel || `panel_${i + 1}`,
-          url: buildImageUrl(img.thumbnail_url),
-          thumbnail_url: buildImageUrl(img.thumbnail_url),
-          sha256: img.sha256_recorded,
-        });
-      });
-    }
-    return list;
+    return normalizeEvidenceList(currentScan || scan, scanId, evidenceIntegrity);
   }, [currentScan, scan, scanId, evidenceIntegrity]);
 
   const handleVerifyEvidence = async () => {
@@ -428,13 +375,15 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
   // Auto-sync fresh findings and scan details from server on mount
   useEffect(() => {
     if (!scanId) return;
-    // Skip redundant network request if fresh assessed findings were already provided
+    // Skip redundant network request if fresh assessed findings AND images were already provided
     if (
       scan?.findings &&
       Array.isArray(scan.findings) &&
       scan.findings.length > 0 &&
       scan?.overall_result &&
-      scan.overall_result !== 'not_assessed'
+      scan.overall_result !== 'not_assessed' &&
+      Array.isArray(scan?.images) &&
+      scan.images.length > 0
     ) {
       return;
     }
@@ -805,34 +754,24 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
               {evidenceImages.map((img, idx) => {
                 const rawUrl = img.thumbnail_url || img.url;
                 const highResUrl = img.url || rawUrl;
+                const scanKey = scanId ? `scan-${scanId}` : `local-${currentScan?.id || 'pkg'}`;
+                const itemKey = `evidence-${scanKey}-${img.panel}-${img.id}-${img.sha256 || idx}`;
 
                 return (
-                  <Pressable
-                    key={`evidence-${scanId || 'scan'}-${img.panel}-${img.id}-${img.sha256 || idx}`}
-                    onPress={() => setSelectedImage({ ...img, displayUrl: highResUrl })}
-                    style={styles.thumbWrapper}
-                    accessibilityRole="imagebutton"
+                  <EvidenceThumbnail
+                    key={itemKey}
+                    uri={rawUrl}
+                    panel={img.panel}
+                    sha256={img.sha256}
+                    width={72}
+                    height={72}
+                    onPress={() => {
+                      setModalLoading(true);
+                      setModalError(false);
+                      setSelectedImage({ ...img, displayUrl: highResUrl });
+                    }}
                     accessibilityLabel={`View ${img.panel} panel evidence`}
-                  >
-                    {rawUrl ? (
-                      <Image
-                        source={{
-                          uri: rawUrl,
-                          headers: (getAccessToken() && !rawUrl.startsWith('file://'))
-                            ? { Authorization: `Bearer ${getAccessToken()}` }
-                            : undefined,
-                        }}
-                        style={styles.panelThumb}
-                      />
-                    ) : (
-                      <View style={[styles.panelThumb, { backgroundColor: colors.borderLight, justifyContent: 'center', alignItems: 'center' }]}>
-                        <Text style={{ fontSize: 10, color: colors.textMuted }}>No photo</Text>
-                      </View>
-                    )}
-                    <View style={styles.panelBadge}>
-                      <Text style={styles.panelBadgeText}>{(img.panel || 'panel').toUpperCase()}</Text>
-                    </View>
-                  </Pressable>
+                  />
                 );
               })}
             </ScrollView>
@@ -1079,16 +1018,44 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
             </View>
             <View style={styles.imageModalBody}>
               {selectedImage?.displayUrl ? (
-                <Image
-                  source={{
-                    uri: selectedImage.displayUrl,
-                    headers: (getAccessToken() && !selectedImage.displayUrl.startsWith('file://'))
-                      ? { Authorization: `Bearer ${getAccessToken()}` }
-                      : undefined,
-                  }}
-                  style={styles.fullscreenImage}
-                  resizeMode="contain"
-                />
+                <>
+                  <Image
+                    source={{
+                      uri: selectedImage.displayUrl,
+                      headers: getImageAuthHeaders(selectedImage.displayUrl),
+                    }}
+                    style={styles.fullscreenImage}
+                    resizeMode="contain"
+                    onLoadStart={() => {
+                      setModalLoading(true);
+                      setModalError(false);
+                    }}
+                    onLoadEnd={() => setModalLoading(false)}
+                    onError={() => {
+                      setModalLoading(false);
+                      setModalError(true);
+                    }}
+                  />
+                  {modalLoading && !modalError && (
+                    <View style={styles.modalLoadingBox}>
+                      <ActivityIndicator size="large" color={colors.white} />
+                      <Text style={{ color: '#94A3B8', fontSize: 12, marginTop: 8 }}>
+                        Loading high-resolution evidence…
+                      </Text>
+                    </View>
+                  )}
+                  {modalError && (
+                    <View style={styles.modalLoadingBox}>
+                      <Text style={{ fontSize: 24, marginBottom: 4 }}>⚠️</Text>
+                      <Text style={{ color: colors.white, fontSize: 13, fontWeight: '700' }}>
+                        Failed to load evidence image
+                      </Text>
+                      <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 2, textAlign: 'center' }}>
+                        The original evidence file may be inaccessible or network connection was interrupted.
+                      </Text>
+                    </View>
+                  )}
+                </>
               ) : (
                 <Text style={{ color: colors.white }}>Image unavailable</Text>
               )}
@@ -1496,5 +1463,12 @@ const styles = StyleSheet.create({
   fullscreenImage: {
     width: '100%',
     height: '100%',
+  },
+  modalLoadingBox: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    padding: spacing.md,
   },
 });

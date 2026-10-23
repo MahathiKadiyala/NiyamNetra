@@ -56,14 +56,15 @@ export default function InspectorFlow({ navigation }) {
           checks_total: s.checks_total || 19,
           checks_assessed: s.checks_assessed || 0,
           findings: s.findings || [],
+          images: s.images || [],
           panelPhotos: (s.images || []).reduce((acc, img) => {
-            acc[img.panel] = `/scans/${s.id}/images/${img.id}`;
+            acc[img.panel] = img.url || `/scans/${s.id}/images/${img.id}`;
             return acc;
           }, {}),
           panelEvidence: {},
           files: (s.images || []).map((img) => ({
             panel: img.panel,
-            uri: `/scans/${s.id}/images/${img.id}`,
+            uri: img.url || `/scans/${s.id}/images/${img.id}`,
           })),
           created_at: s.created_at,
         }));
@@ -239,7 +240,7 @@ export default function InspectorFlow({ navigation }) {
 
       {mode === 'findings' && (
         <FindingsScreen
-          key={selectedScan?.server_id || selectedScan?.id || 'scan'}
+          key={`findings-${selectedScan?.server_id || selectedScan?.id || 'scan'}`}
           scan={selectedScan}
           onBack={handleBackToSession}
           onSaveFindings={handleSaveFindings}

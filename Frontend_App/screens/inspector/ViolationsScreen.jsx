@@ -7,6 +7,7 @@ import VerdictBadge from '../../components/VerdictBadge';
 import EmptyState from '../../components/EmptyState';
 import FindingRow from '../../components/FindingRow';
 import SegmentControl from '../../components/SegmentControl';
+import EvidenceThumbnail from '../../components/EvidenceThumbnail';
 import { fetchInspections } from '../../api/admin';
 import { API_BASE_URL } from '../../api/config';
 import { getAccessToken } from '../../api/client';
@@ -179,26 +180,20 @@ export default function ViolationsScreen({ navigation }) {
                 {(v.evidence_uris || v.photos || v.images || []).map((u, i) => {
                   const rawUri = typeof u === 'string' ? u : u?.thumbnail_url || u?.url || u?.uri || u?.file_path;
                   if (!rawUri) return null;
-                  const uri = (rawUri.startsWith('http://') || rawUri.startsWith('https://') || rawUri.startsWith('file://'))
-                    ? rawUri
-                    : `${API_BASE_URL.replace(/\/+$/, '')}/${rawUri.replace(/^\/+/, '')}`;
+                  const panel = (typeof u === 'object' && u?.panel) ? u.panel : `panel_${i + 1}`;
+                  const sha256 = typeof u === 'object' ? u?.sha256 : null;
+                  const itemKey = `violation-evidence-${v?.id || 'item'}-${panel}-${u?.id || i}-${sha256 || rawUri}`;
                   return (
-                    <Pressable
-                      key={i}
-                      onPress={() => Alert.alert('Evidence', `Image ${i + 1} — file retained securely on server.`)}
-                      accessibilityRole="imagebutton"
-                      accessibilityLabel={`Evidence image ${i + 1}`}
-                    >
-                      <Image
-                        source={{
-                          uri,
-                          headers: (getAccessToken() && !uri.startsWith('file://'))
-                            ? { Authorization: `Bearer ${getAccessToken()}` }
-                            : undefined,
-                        }}
-                        style={{ width: 60, height: 60, borderRadius: radius.sm, backgroundColor: colors.border, margin: spacing.xs, borderWidth: 2, borderColor: colors.saffron }}
-                      />
-                    </Pressable>
+                    <EvidenceThumbnail
+                      key={itemKey}
+                      uri={rawUri}
+                      panel={panel}
+                      sha256={sha256}
+                      width={64}
+                      height={64}
+                      onPress={() => Alert.alert('Evidence', `${panel.toUpperCase()} panel evidence — retained securely on server.`)}
+                      accessibilityLabel={`Evidence ${panel} panel`}
+                    />
                   );
                 })}
               </View>

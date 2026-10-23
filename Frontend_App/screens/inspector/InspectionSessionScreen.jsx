@@ -409,6 +409,7 @@ export default function InspectionSessionScreen({
           geometry,
           panelPhotos: { ...panelPhotos },
           panelEvidence: { ...panelEvidence },
+          images: assessedScan.images || [],
           files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
             uri: e.original_uri,
             panel: e.panel,
@@ -449,6 +450,7 @@ export default function InspectionSessionScreen({
           geometry,
           panelPhotos: { ...panelPhotos },
           panelEvidence: { ...panelEvidence },
+          images: [],
           files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
             uri: e.original_uri,
             panel: e.panel,
