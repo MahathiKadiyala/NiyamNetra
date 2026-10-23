@@ -628,7 +628,7 @@ export default function InspectionSessionScreen({
                         #{idx + 1}: {pkgTitle}
                       </Text>
                       <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
-                        Batch: {(pkg.batch_number && pkg.batch_number !== 'N/A' && !pkg.batch_number.toLowerCase().includes('unspecified')) ? pkg.batch_number : 'Batch not observed'} • {checksCount} Checks Evaluated
+                        Batch: {(pkg.batch_number && pkg.batch_number !== 'N/A' && !pkg.batch_number.toLowerCase().includes('unspecified')) ? pkg.batch_number : 'Batch not observed'} • {typeof pkg.checks_assessed === 'number' ? `${pkg.checks_assessed}/${checksCount} Checks Assessed` : `${checksCount} Checks`}
                       </Text>
                     </View>
                   <View style={[styles.rowAlign, { gap: 6 }]}>

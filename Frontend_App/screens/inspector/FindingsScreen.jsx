@@ -237,6 +237,8 @@ export const STATUTORY_CHECKS_MASTER = [
 import {
   ASSESSMENT_STATE,
   deriveAssessmentState,
+  deriveAssessmentCounts,
+  deduplicateFindings,
   formatFinding,
   formatFindings,
   computeEvidenceFingerprint,
@@ -245,6 +247,8 @@ import {
 export {
   ASSESSMENT_STATE,
   deriveAssessmentState,
+  deriveAssessmentCounts,
+  deduplicateFindings,
   formatFinding,
   formatFindings,
   computeEvidenceFingerprint,
@@ -535,10 +539,16 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
     }
   };
 
-  const passCount = findings.filter((f) => f.effective_verdict === 'pass').length;
-  const failCount = findings.filter((f) => f.effective_verdict === 'fail').length;
-  const notAssessedCount = findings.filter((f) => f.effective_verdict === 'not_assessed').length;
-  const notApplicableCount = findings.filter((f) => f.effective_verdict === 'not_applicable' || f.effective_verdict === 'out_of_scope').length;
+  const assessmentCounts = deriveAssessmentCounts(currentScan, findings);
+  const {
+    pass_count: passCount,
+    fail_count: failCount,
+    not_assessed_count: notAssessedCount,
+    not_applicable_count: notApplicableCount,
+    checks_assessed: checksAssessed,
+    checks_total: checksTotal,
+    total_findings: totalFindings,
+  } = assessmentCounts;
 
   // Authoritative overall verdict derivation
   const rawOverall = currentScan?.overall_result;
@@ -686,6 +696,23 @@ export default function FindingsScreen({ scan, onBack, onSaveFindings }) {
                   ]}
                 >
                   ○ {notApplicableCount} Not Applicable
+                </Text>
+              </View>
+            )}
+            {checksTotal > 0 && (
+              <View
+                style={[
+                  styles.statBadge,
+                  { backgroundColor: '#F8FAFC', borderColor: '#CBD5E1' },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.statBadgeText,
+                    { color: colors.textMuted || '#64748B' },
+                  ]}
+                >
+                  📊 {checksAssessed}/{checksTotal} Assessed
                 </Text>
               </View>
             )}

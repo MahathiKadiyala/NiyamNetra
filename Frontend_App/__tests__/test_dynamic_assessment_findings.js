@@ -515,6 +515,8 @@ it('22. Frontend screens avoid conflating 26 catalog rules with per-scan finding
 const {
   ASSESSMENT_STATE,
   deriveAssessmentState,
+  deriveAssessmentCounts,
+  deduplicateFindings,
   formatFinding: formatFindingItem,
   formatFindings: formatFindingsList,
   computeEvidenceFingerprint: computeFp,
@@ -877,6 +879,230 @@ it('34. Evidence thumbnail URLs and auth headers remain valid and JWT-free', () 
   const sampleToken = 'eyJhbGciOiJIUzI1NiJ9.demo';
   const headers = getImageAuthHeaders(normalized[0].url, sampleToken);
   assert.deepStrictEqual(headers, { Authorization: `Bearer ${sampleToken}` });
+});
+
+// =========================================================================
+// Prompt 9.1: Verify Assessment Counter Contract (35-40)
+// =========================================================================
+
+// 35. 4 pass, 3 fail, 12 not-assessed findings yield 19 total findings and 7 assessed checks
+it('35. 4 pass, 3 fail, 12 not-assessed findings yield 19 total findings and 7 assessed checks', () => {
+  const scan = {
+    id: 301,
+    status: 'assessed',
+    overall_result: 'violation',
+    checks_total: 19,
+    checks_assessed: 7,
+    counts: {
+      total: 19,
+      passed: 4,
+      failed: 3,
+      not_assessed: 12,
+    },
+  };
+
+  const rawFindings = [
+    // 4 pass
+    { check_id: 'CHK01', title: 'Declarations', effective_verdict: 'pass' },
+    { check_id: 'CHK02', title: 'Tobacco Scope', effective_verdict: 'pass' },
+    { check_id: 'CHK03', title: 'Chapter II Scope', effective_verdict: 'pass' },
+    { check_id: 'CHK04', title: 'MRP Expression', effective_verdict: 'pass' },
+    // 3 fail
+    { check_id: 'CHK05', title: 'Prescribed Units', effective_verdict: 'fail' },
+    { check_id: 'CHK06', title: 'Letter Height', effective_verdict: 'fail' },
+    { check_id: 'CHK18', title: 'Sanctions Tier', effective_verdict: 'fail' },
+    // 12 not_assessed
+    { check_id: 'CHK06b', title: 'Numeral Height', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK07', title: 'Area of PDP', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK08', title: 'Width Proportion', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK09', title: 'Quantity Fractional', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK10', title: 'Packer Address', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK11', title: 'Sticker Affixation', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK12', title: 'Customer Care', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK13', title: 'Date Expiry', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK14', title: 'Medical Devices', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK15', title: 'E-Commerce Retail', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK16', title: 'Origin Search Filter', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK17', title: 'FSSAI Advisory', effective_verdict: 'not_assessed' },
+  ];
+
+  const formatted = formatFindingsList(rawFindings);
+  assert.strictEqual(formatted.length, 19);
+
+  const derived = deriveAssessmentCounts(scan, formatted);
+
+  // Exact arithmetic invariants
+  assert.strictEqual(derived.pass_count, 4);
+  assert.strictEqual(derived.fail_count, 3);
+  assert.strictEqual(derived.not_assessed_count, 12);
+  assert.strictEqual(derived.total_findings, 19);
+  assert.strictEqual(derived.checks_assessed, 7);
+  assert.strictEqual(derived.checks_total, 19);
+
+  // Structural equation invariants
+  assert.strictEqual(
+    derived.pass_count + derived.fail_count + derived.not_assessed_count,
+    derived.total_findings
+  );
+  assert.strictEqual(
+    derived.checks_assessed,
+    derived.pass_count + derived.fail_count
+  );
+  assert.strictEqual(derived.total_findings, derived.checks_total);
+});
+
+// 36. Empty findings array yields 0 total findings, 0 assessed checks, and 0 pass/fail
+it('36. Empty findings array yields 0 total findings, 0 assessed checks, and 0 pass/fail', () => {
+  const emptyScan = {
+    id: 302,
+    status: 'draft',
+    checks_total: 0,
+    checks_assessed: 0,
+    counts: { total: 0, passed: 0, failed: 0, not_assessed: 0 },
+  };
+
+  const derived = deriveAssessmentCounts(emptyScan, []);
+
+  assert.strictEqual(derived.total_findings, 0);
+  assert.strictEqual(derived.checks_assessed, 0);
+  assert.strictEqual(derived.checks_total, 0);
+  assert.strictEqual(derived.pass_count, 0);
+  assert.strictEqual(derived.fail_count, 0);
+  assert.strictEqual(derived.not_assessed_count, 0);
+  assert.strictEqual(
+    derived.pass_count + derived.fail_count + derived.not_assessed_count,
+    derived.total_findings
+  );
+  assert.strictEqual(derived.checks_assessed, derived.pass_count + derived.fail_count);
+});
+
+// 37. Partially applicable assessment reflects actual returned findings count, not hardcoded 19
+it('37. Partially applicable assessment reflects actual returned findings count, not hardcoded 19', () => {
+  const partialScan = {
+    id: 303,
+    status: 'assessed',
+    overall_result: 'violation',
+    checks_total: 10,
+    checks_assessed: 7,
+  };
+
+  const partialFindings = [
+    { check_id: 'CHK01', effective_verdict: 'pass' },
+    { check_id: 'CHK02', effective_verdict: 'pass' },
+    { check_id: 'CHK03', effective_verdict: 'pass' },
+    { check_id: 'CHK04', effective_verdict: 'pass' },
+    { check_id: 'CHK05', effective_verdict: 'pass' },
+    { check_id: 'CHK06', effective_verdict: 'pass' },
+    { check_id: 'CHK18', effective_verdict: 'fail' },
+    { check_id: 'CHK07', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK08', effective_verdict: 'not_assessed' },
+    { check_id: 'CHK09', effective_verdict: 'not_assessed' },
+  ];
+
+  const derived = deriveAssessmentCounts(partialScan, partialFindings);
+
+  assert.strictEqual(derived.total_findings, 10);
+  assert.strictEqual(derived.pass_count, 6);
+  assert.strictEqual(derived.fail_count, 1);
+  assert.strictEqual(derived.not_assessed_count, 3);
+  assert.strictEqual(derived.checks_assessed, 7);
+  assert.strictEqual(derived.checks_total, 10);
+  assert.notStrictEqual(derived.checks_total, 19);
+});
+
+// 38. Duplicate finding identities are handled consistently with backend precedence
+it('38. Duplicate finding identities collapse with fail precedence and preserve CHK06 vs CHK06b', () => {
+  const findingsWithDups = [
+    // Duplicate CHK01 with one pass and one fail
+    { check_id: 'CHK01', title: 'Declarations', effective_verdict: 'pass', evidence_references: ['front_img'] },
+    { check_id: 'CHK01', title: 'Declarations', effective_verdict: 'fail', evidence_references: ['back_img'] },
+    // Distinct checks CHK06 and CHK06b
+    { check_id: 'CHK06', title: 'PDP Letter Height', effective_verdict: 'pass' },
+    { check_id: 'CHK06b', title: 'Net Qty Numeral Height', effective_verdict: 'pass' },
+  ];
+
+  const deduped = deduplicateFindings(findingsWithDups);
+
+  // CHK01 collapsed into 1 finding with FAIL winning
+  const chk01Items = deduped.filter((f) => f.check_id === 'CHK01');
+  assert.strictEqual(chk01Items.length, 1);
+  assert.strictEqual(chk01Items[0].effective_verdict, 'fail');
+  assert.strictEqual(chk01Items[0].evidence_references.includes('front_img'), true);
+  assert.strictEqual(chk01Items[0].evidence_references.includes('back_img'), true);
+
+  // CHK06 and CHK06b both preserved
+  assert.strictEqual(deduped.some((f) => f.check_id === 'CHK06'), true);
+  assert.strictEqual(deduped.some((f) => f.check_id === 'CHK06b'), true);
+  assert.strictEqual(deduped.length, 3);
+
+  // Derived counts on deduped set
+  const derived = deriveAssessmentCounts({ id: 304 }, deduped);
+  assert.strictEqual(derived.total_findings, 3);
+  assert.strictEqual(derived.pass_count, 2);
+  assert.strictEqual(derived.fail_count, 1);
+  assert.strictEqual(derived.checks_assessed, 3);
+});
+
+// 39. UI summary counters distinguish catalog rules (26) from checks assessed and total
+it('39. UI summary counters distinguish catalog rules (26) from checks assessed and total', () => {
+  const scan = {
+    id: 305,
+    checks_total: 19,
+    checks_assessed: 7,
+    diagnostics: {
+      catalog_rule_count: 26,
+      executable_check_count: 19,
+    },
+  };
+
+  const derived = deriveAssessmentCounts(scan, [
+    ...Array(4).fill(null).map((_, i) => ({ check_id: `CHK_P_${i}`, effective_verdict: 'pass' })),
+    ...Array(3).fill(null).map((_, i) => ({ check_id: `CHK_F_${i}`, effective_verdict: 'fail' })),
+    ...Array(12).fill(null).map((_, i) => ({ check_id: `CHK_N_${i}`, effective_verdict: 'not_assessed' })),
+  ]);
+
+  assert.strictEqual(derived.catalog_rule_count, 26);
+  assert.strictEqual(derived.executable_check_count, 19);
+  assert.strictEqual(derived.checks_assessed, 7);
+  assert.strictEqual(derived.checks_total, 19);
+  assert.strictEqual(derived.total_findings, 19);
+
+  // The UI pill string matches: "7/19 Assessed"
+  const pillText = `📊 ${derived.checks_assessed}/${derived.checks_total} Assessed`;
+  assert.strictEqual(pillText, '📊 7/19 Assessed');
+  assert.strictEqual(pillText.includes('26'), false);
+});
+
+// 40. OCR failure state preserves all 19 findings as not-assessed with 0 assessed checks
+it('40. OCR failure state preserves all 19 findings as not-assessed with 0 assessed checks', () => {
+  const ocrFailureScan = {
+    id: 306,
+    status: 'assessed',
+    overall_result: 'not_assessed',
+    checks_total: 19,
+    checks_assessed: 0,
+    diagnostics: {
+      ocr_status: 'no_text',
+    },
+  };
+
+  const ocrFindings = Array(19).fill(null).map((_, i) => ({
+    check_id: `CHK${String(i + 1).padStart(2, '0')}`,
+    effective_verdict: 'not_assessed',
+    engine_verdict: 'not_assessed',
+    reason: 'OCR provider timeout: no text was recognised',
+  }));
+
+  const derived = deriveAssessmentCounts(ocrFailureScan, ocrFindings);
+  const state = deriveAssessmentState({ currentScan: ocrFailureScan, findings: ocrFindings });
+
+  assert.strictEqual(state, ASSESSMENT_STATE.TECHNICAL_FAILURE);
+  assert.strictEqual(derived.total_findings, 19);
+  assert.strictEqual(derived.pass_count, 0);
+  assert.strictEqual(derived.fail_count, 0);
+  assert.strictEqual(derived.not_assessed_count, 19);
+  assert.strictEqual(derived.checks_assessed, 0);
+  assert.strictEqual(derived.checks_total, 19);
 });
 
 console.log(`\nDynamic Assessment Findings Results: ${passed} passed, ${failed} failed.\n`);

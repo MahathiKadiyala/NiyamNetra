@@ -160,9 +160,89 @@ export function formatFinding(f, idx = 0) {
   };
 }
 
-export function formatFindings(rawFindings) {
+export function deduplicateFindings(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) {
+    return [];
+  }
+  const grouped = new Map();
+  for (const f of findings) {
+    const key = f.check_id || f.rule_id || f.code || String(f.id);
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(f);
+  }
+
+  const deduped = [];
+  for (const [key, items] of grouped.entries()) {
+    if (items.length === 1) {
+      deduped.push(items[0]);
+      continue;
+    }
+
+    const fails = items.filter((i) => i.effective_verdict === 'fail' || i.effective_verdict === 'violation' || i.engine_verdict === 'fail');
+    const passes = items.filter((i) => i.effective_verdict === 'pass' || i.effective_verdict === 'compliant' || i.engine_verdict === 'pass');
+
+    // Merge evidence references from all copies
+    const allRefs = Array.from(new Set(items.flatMap((i) => i.evidence_references || [key])));
+
+    let primary;
+    if (fails.length > 0) {
+      primary = { ...fails[0], evidence_references: allRefs };
+    } else if (passes.length > 0) {
+      primary = { ...passes[0], evidence_references: allRefs };
+    } else {
+      primary = { ...items[0], evidence_references: allRefs };
+    }
+    deduped.push(primary);
+  }
+  return deduped;
+}
+
+export function formatFindings(rawFindings, { deduplicate = true } = {}) {
   if (!Array.isArray(rawFindings) || rawFindings.length === 0) {
     return [];
   }
-  return rawFindings.map((f, idx) => formatFinding(f, idx)).filter(Boolean);
+  const formatted = rawFindings.map((f, idx) => formatFinding(f, idx)).filter(Boolean);
+  return deduplicate ? deduplicateFindings(formatted) : formatted;
+}
+
+/**
+ * Derives assessment summary counters from the normalized unique finding collection,
+ * strictly maintaining the authoritative counting contract:
+ *   total_findings = pass_count + fail_count + not_assessed_count (+ not_applicable_count)
+ *   checks_assessed = pass_count + fail_count
+ *   checks_total = scan?.checks_total || scan?.counts?.total || total_findings
+ */
+export function deriveAssessmentCounts(scan, findings) {
+  const normFindings = Array.isArray(findings) ? deduplicateFindings(findings) : [];
+
+  const passCount = normFindings.filter(
+    (f) => f.effective_verdict === 'pass' || f.effective_verdict === 'compliant'
+  ).length;
+  const failCount = normFindings.filter(
+    (f) => f.effective_verdict === 'fail' || f.effective_verdict === 'violation'
+  ).length;
+  const notAssessedCount = normFindings.filter(
+    (f) => f.effective_verdict === 'not_assessed'
+  ).length;
+  const notApplicableCount = normFindings.filter(
+    (f) => f.effective_verdict === 'not_applicable' || f.effective_verdict === 'out_of_scope'
+  ).length;
+
+  const totalFindings = normFindings.length;
+  const checksAssessed = passCount + failCount;
+  const checksTotal = scan?.checks_total ?? scan?.counts?.total ?? totalFindings;
+
+  return {
+    total_findings: totalFindings,
+    pass_count: passCount,
+    fail_count: failCount,
+    not_assessed_count: notAssessedCount,
+    not_applicable_count: notApplicableCount,
+    checks_assessed: checksAssessed,
+    checks_total: checksTotal,
+    catalog_rule_count: scan?.diagnostics?.catalog_rule_count ?? 26,
+    executable_check_count: scan?.diagnostics?.executable_check_count ?? 19,
+  };
 }
