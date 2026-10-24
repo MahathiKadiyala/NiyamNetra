@@ -171,3 +171,55 @@ The repository's authoritative Alembic migration sequence comprises 9 migrations
 | `0007` | `0007_refusal_and_ocr_cache.py` | Adds `signature_status` to `inspections` and `ocr_cache_hash` / `ocr_cache` to `scans`. |
 | `0008` | `0008_enforce_not_null_constraints.py` | Enforces strict NOT NULL constraints, foreign keys, and check constraints across tables. |
 | `0009` | `0009_add_missing_phase2_to_phase6_columns.py` | Adds LLM metadata (`llm_structured_data`, `llm_cache_hash`, `llm_provider`, `llm_model`, `llm_duration_ms`), inspection sync metrics (`clock_skew_seconds`, `edited_offline`), and finding adjudication columns (`human_verdict`, `effective_verdict`). |
+
+---
+
+## 5. Migration Execution Runbook & Environment Deployment
+
+### 5.1 Fresh Databases (Local / Dev / Test Environments)
+- When initializing a clean SQLite database or test instance, SQLAlchemy creates tables via `Base.metadata.create_all(bind=engine)`.
+- Alembic migrations use defensive column checks (`IF NOT EXISTS` or exception handling), ensuring that subsequent migration commands run idempotently as safe no-ops on clean schemas without column collisions.
+
+### 5.2 Existing Production Databases (Supabase / PostgreSQL)
+To apply pending migrations on an active PostgreSQL database:
+```bash
+cd Backend
+alembic upgrade head
+```
+
+Verify migration status and commit history:
+```bash
+alembic current
+alembic history --verbose
+```
+
+Run test suite verification post-migration:
+```bash
+pytest -q
+```
+
+### 5.3 SQLite to PostgreSQL Migration Runbook
+1. Apply the complete migration chain against the target PostgreSQL `DATABASE_URL`:
+   ```bash
+   alembic upgrade head
+   ```
+2. Export and load seed or master store records if required for initial bootstrapping.
+3. Configure `DATABASE_URL` in `.env` using the Psycopg 3 scheme:
+   ```ini
+   DATABASE_URL=postgresql+psycopg://<db_user>:<db_password>@<db_host>:5432/<db_name>?sslmode=require
+   ```
+4. Verify deployment integrity with the automated test suite:
+   ```bash
+   pytest -q
+   ```
+
+---
+
+## 6. Seed Data Guard & Production Isolation
+
+The seed fixture script (`Backend/seed.py`) populates baseline users (admin and inspectors) and demonstration stores:
+
+- **Environment Restriction:** `seed.py` is strictly reserved for local development and demonstration (`ENV != production` / `ENV == 'dev'`).
+- **Production Guard:** Seeding must **never** be executed against production databases (`ENV=production`). Executing seed scripts in production risks inserting synthetic demonstration stores, altering registered officer accounts, and perturbing the cryptographic integrity of append-only audit ledgers.
+- **Credential Safety:** The seed script requires `SEED_PASSWORD` to be explicitly supplied via environment variables (`SEED_PASSWORD='...' python seed.py`), ensuring no default or literal passwords are ever committed to version control.
+- **Idempotency Invariant:** `seed.py` guards users by `employee_id` and stores by `name`. The inspection corpus is seeded only when the `inspections` table is completely empty, ensuring running the script multiple times does not duplicate fixture records.

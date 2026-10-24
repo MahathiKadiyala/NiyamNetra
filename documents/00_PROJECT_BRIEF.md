@@ -85,8 +85,8 @@ Pre-packaged goods across India are governed by Chapter II of the Legal Metrolog
 | **Active Statutory Rule Pack** | `2026.09.v1` (Fourth Amendment G.S.R. 826(E) baseline) |
 | **Statutory Rules As At** | `2026-09-21` |
 | **Registered Statutory Rules** | 26 registered rules: 19 executable checks and 7 manual-review/advisory checks |
-| **Backend Test Suite** | **568 automated tests collected** across 35 test files (`pytest --collect-only -q`); recorded release baseline verified **428 passed, 0 failed** |
-| **Frontend Test Suite** | **228 assertions passed, 0 failed** across all 8 test suites (`node run_all_tests.js`) |
+| **Backend Test Suite** | **598 automated tests collected** across 48 test modules (`pytest --collect-only -q`); Module 11 targeted regression suite verified **145 passed, 0 failed, 0 skipped**; recorded release baseline verified **428 passed, 0 failed** |
+| **Frontend Test Suite** | **254 assertions passed, 0 failed** across all 9 test suites (`node run_all_tests.js` in `Frontend_App`) |
 | **Release APK Version** | v1.0.4 (VersionCode: 5) |
 | **Release APK File** | `release/NiyamNetra-v1.0.4-release.apk` |
 | **APK SHA-256 Digest** | `DB6897E8FB05CA062C3E44839C9605B998F0FD533481F9F8F62C3D141BF366BA` |

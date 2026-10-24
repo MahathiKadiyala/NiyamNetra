@@ -129,6 +129,24 @@ To prevent credential leaks in decompiled mobile packages:
 - **In-Flight Race Condition Guard:** Monotonic session generation counters invalidate late in-flight network responses initiated prior to logout, account switching, or jurisdiction change.
 - **Offline Revocation Boundary:** An offline device cannot instantaneously detect server-side credential or permission revocations until network connectivity is restored and the authorization scope is re-verified. Cached review entries are bounded by a strict 24-hour TTL and 30-page storage cap.
 
+### 4.5 Provider Credential Redaction & Operational Diagnostic Hardening
+- **Diagnostic Text Sanitization (`sanitize_sensitive_text`):** All error strings, exception messages, upstream provider tracebacks, and operational logs are processed through regex-based sanitization. API keys (`apikey=...`, `key=...`), Authorization Bearer tokens, and sensitive query parameters are replaced with `[REDACTED]` before leaving server memory.
+- **Safe Operational Readiness (`get_ocr_health_diagnostics`):** The public `/health` endpoint exposes high-level operational readiness (`unconfigured`, `ready_unverified`, `live_verified`, `degraded`, `all_failed`, `unauthorized`, `billing_error`) and provider candidate status without revealing secret values, file paths, or private credentials.
+- **Distinction of Unconfigured vs Failed Providers:** Diagnostics strictly separate providers whose required credentials are completely absent (`unconfigured` / `missing_configuration`) from configured providers that failed at runtime (`live_verified = false`, `last_error_category = auth_error | timeout | all_failed`).
+- **Required Manual Security Action:** An authorized administrator must manually rotate the previously exposed OCR.space credential in the Render production environment and verify that the rotated key restores un-degraded fallback readiness.
+- **Verification Non-Equivalence:** A healthy `200 OK` response from `/health` is **not** evidence that live cloud OCR, LLM extraction, and deterministic rules have executed successfully end-to-end. External paid OCR calls are intentionally blocked in automated regression suites to prevent quota charges.
+
+### 4.6 Repository Secret Hygiene, Git History Scrubbing & Credential Governance
+- **Environment File Isolation:** Live `.env` files containing cryptographic signing keys, database connection strings, and cloud credentials must never be tracked by git. `.gitignore` explicitly enforces the exclusion of all `.env` files.
+- **Example Template Practice:** Only `.env.example` is committed to version control, containing placeholder variable names and descriptive format comments with zero live credentials or real secrets.
+- **Git Commit History Audits:** Commit history must be regularly audited for accidental credential inclusion (e.g. `git log -p -- ...` or automated scanning tools). If an API key or password is found committed in historical commits:
+  1. Immediately revoke and rotate the compromised credential in the upstream cloud provider dashboard.
+  2. Purge the sensitive artifact from repository commit history using `git-filter-repo` or `BFG Repo-Cleaner`.
+  3. Force-push the sanitized tree and ensure all development environments pull the rewritten history.
+- **JWT Secret Rotation Protocol:** In the event of a suspected or scheduled `JWT_SECRET` rotation:
+  1. Update `JWT_SECRET` in server environment configuration.
+  2. Increment the `token_epoch` column across all active users in the database (`UPDATE users SET token_epoch = token_epoch + 1`), which immediately invalidates all outstanding refresh tokens and forces re-authentication across all mobile devices.
+
 ---
 
 ## 5. Privacy & DPDP Act 2023 Compliance Position

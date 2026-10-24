@@ -44,16 +44,18 @@ The NiyamNetra Legal Compliance Engine is a strictly deterministic, versioned, d
 ### 1.2 Arithmetic Counting Contract & Denominator Invariants
 The engine strictly separates registered rule catalog entries from executable algorithmic checks:
 - **26 Registered Statutory Rules:** Total rule catalogue defined in `lmpc_2026_09_v1.json`.
-- **19 Executable Algorithmic Checks:** Checks executed programmatically during every automated scan assessment (`CHK01` through `CHK18`).
+- **19 Executable Algorithmic Checks:** Checks defined by the active rule pack (`CHK01` through `CHK18`).
 - **7 Manual-Review & Advisory Checks:** Rules addressing subjective labeling attributes, origin marking symbols under Rule 6(4A)(d), and statutory notice recommendations.
+- **Scan Findings Returned (`total_findings`):** Itemized findings evaluated and returned for the specific scan. A full applicable assessment can return 19 findings, whereas a partially applicable assessment may return fewer based on commodity scope.
 
-Across every scan assessment, the arithmetic relationship is guaranteed:
-$$\text{checks\_total} = 19$$
-$$\text{checks\_assessed} = \text{passed} + \text{failed}$$
-$$\text{not\_assessed} = \text{checks\_total} - \text{checks\_assessed}$$
-$$\text{total\_findings} = \text{passed} + \text{failed} + \text{not\_assessed} = \text{checks\_total} = 19$$
+Across every scan assessment, the arithmetic relationships are strictly enforced:
+$$\text{total\_findings} = \text{pass\_count} + \text{fail\_count} + \text{not\_assessed\_count}$$
+$$\text{checks\_assessed} = \text{pass\_count} + \text{fail\_count}$$
+$$\text{not\_assessed\_count} = \text{total\_findings} - \text{checks\_assessed}$$
 
-A package achieves `COMPLIANT` if and only if $\text{passed} = 19$, with $\text{failed} = 0$ and $\text{not\_assessed} = 0$.
+**Distinct Check Identities & Deduplication:** Distinct check codes evaluate independent statutory requirements and are never collapsed. For example, `CHK06` (Principal Display Panel character height under Rule 7 Table-I) and `CHK06b` (Net Quantity declaration specific numeral height under Rule 7) remain distinct finding rows. Multi-panel deduplication strictly enforces that a definitive `fail` outranks a `pass`, and `pass` outranks `not_assessed` on identical check identities.
+
+A package achieves `COMPLIANT` if and only if all applicable returned checks pass with zero unassessed or failed checks ($\text{checks\_assessed} = \text{total\_findings}$, with $\text{fail\_count} = 0$ and $\text{not\_assessed\_count} = 0$). In a full applicable assessment, $\text{pass\_count} = 19$.
 
 ---
 
@@ -155,9 +157,8 @@ $$\text{PDP Area } (A) \longrightarrow \text{Minimum Height } (H_{\text{min}})$$
 | **CHK03** | Rule 3 | Retail scope boundary (excludes wholesale/export) | Advisory | None |
 | **CHK04** | Rule 6(1)(e) & 2(m) | Month and year of packing / import / expiry | Major | Section 36(1) |
 | **CHK05** | Rule 12 & Rule 13 | Net quantity standard metric units (g, kg, ml, L) | Critical | Section 36(2) |
-| **CHK06** | Rule 7(1) read with Table-I | Numeral height of Net Quantity based on PDP area | Critical | Section 36(1) |
-| **CHK06b** | Rule 7(2) Table-I (Post-2018) | Numeral height on all packaging types (Table-I) | Major | Section 36(1) |
-| **CHK06b** | Rule 7 Table-II (Pre-2018) | Historical non-rigid packaging height check | Major | Section 36(1) |
+| **CHK06** | Rule 7(2) read with Table-I | Character/numeral height based on PDP area (Table-I) | Critical | Section 36(1) |
+| **CHK06b** | Rule 7 Net Quantity Height | Specific minimum numeral height for net quantity declaration | Major | Section 36(1) |
 | **CHK07** | Rule 7(3) | Letter height of unit symbols accompanying numerals | Minor | Section 36(1) |
 | **CHK08** | Rule 9(1) | Clarity, contrast, and conspicuous declaration layout | Minor | Section 36(1) |
 | **CHK09** | Rule 8 | Declaration placement on Principal Display Panel | Minor | Section 36(1) |

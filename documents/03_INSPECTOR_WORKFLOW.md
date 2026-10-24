@@ -165,3 +165,39 @@ Supervisory officers access the centralized review queue (`GET /review/queue`) t
    - **Token Hygiene on Evidence URLs:** Pre-signed evidence image URLs presented in the UI are scrubbed of raw authorization bearer tokens, preventing accidental credential leakage in browser history or exported logs while preserving access-controlled viewing.
    - **Exclusion of Drafts:** Active drafts are strictly excluded from the supervisory queue until formally finalized, preventing unfinished field work from cluttering adjudication workflows.
 
+---
+
+## 8. Evidence Rendering, Assessment States & Counter Contract in the Inspector UI
+
+Following the hardening completed in Modules 8–11, the field inspector interface (`Frontend_App`) implements strict evidence mapping, dynamic state rendering, and arithmetic consistency:
+
+### 8.1 Evidence Thumbnail Rendering & Navigation Isolation
+- **Server-Returned Evidence Binding:** Captured packaging images returned by the backend (`ScanImage` records) are bound directly to their corresponding panel slots (`front`, `back`, `side`, `mrp`, `batch`).
+- **Stable React Keys:** Thumbnails use deterministic, collision-free element keys (e.g. `evidence-thumb-${image.id || image.sha256 || panel}`) to eliminate thumbnail flicker and prevent incorrect panel swapping during component re-renders.
+- **Dynamic Relative URL Resolution:** The mobile client dynamically resolves server-returned relative paths against the configured API root, ensuring consistent image loading across local debugging, staging environments, and production.
+- **Authenticated Image Fetching:** Image requests attach authorization headers in flight. Evidence URLs displayed in the UI and network inspection traces never expose raw Bearer JWT tokens in query strings.
+- **Loading, Error & Retry States:** The `EvidenceThumbnail` component provides non-blocking loading skeletons, fallback placeholders for corrupted images, and retry capabilities without disrupting the inspector's workflow.
+- **Cross-Scan State Isolation:** Switching between scans in a multi-product inspection clears active image buffers and thumbnails, guaranteeing that evidence from Scan 1 never bleeds into Scan 2.
+- **Draft Resumption & Restoration:** Resuming a draft inspection restores previously uploaded panel photos, their thumbnail mappings, and verified checksums directly from server records.
+- **Physical Device Limitation Note:** While the component logic, thumbnail mapping, and relative URL handling are fully verified by automated unit tests (`test_evidence_thumbnail_rendering.js`), physical Android screen rendering must be verified separately on a connected physical device during release clearance.
+
+### 8.2 Data-Driven Assessment Presentation
+- **Backend Response Grounding:** Findings, counter badges, and severity indicators displayed in `ViolationsScreen` and `PassScreen` derive strictly from the backend response (`ScanOut`), completely replacing historical hardcoded mock assessments (such as static 4/3/12 values).
+- **Truthful Operational States:** The UI distinguishes:
+  - `COMPLIANT`: All applicable checks passed.
+  - `VIOLATION`: One or more confirmed statutory breaches detected.
+  - `TECHNICAL_RECOVERY`: Transient OCR or provider network outage; surfaces non-punitive retry options.
+  - `RECAPTURE_REQUIRED`: Missing packaging panels or uncalibrated geometry; highlights targeted camera guidance.
+  - `REVIEW_REQUIRED`: Unresolved ambiguities or cross-panel conflicts requiring officer adjudication.
+  - `LOADING` / `NETWORK_FAILURE`: Displays truthful connectivity or timeout indicators without fabricating results.
+- **Null-Field Honesty:** Unavailable or unread packaging fields (such as missing batch numbers or unobserved expiry dates) remain explicitly unknown. The client never invents default or dummy product data.
+- **In-Flight Response Protection:** When switching scans or re-triggering assessments, session generation tokens ensure obsolete in-flight responses are discarded upon arrival, preventing race conditions from corrupting the active scan view.
+- **Evidence-Triggered Re-Evaluation:** Modifying or uploading new packaging evidence invalidates stale assessment badges, prompting the officer to re-assess the latest evidence set.
+
+### 8.3 Standardized Counting Contract
+The mobile interface strictly displays the backend arithmetic counting contract:
+$$\text{total\_findings} = \text{pass\_count} + \text{fail\_count} + \text{not\_assessed\_count}$$
+$$\text{checks\_assessed} = \text{pass\_count} + \text{fail\_count}$$
+
+- **Clear Denominators:** Total findings reflects the actual returned finding count for the scan (up to 19 for a full applicable assessment, or fewer for partially applicable assessments), with the denominator clearly distinguishing evaluated checks from the 26-rule catalog metadata. The interface never displays the incorrect formula `pass + fail + not_assessed = checks_assessed`.
+- **Distinct Rule Identities:** Checks evaluating different statutory clauses (e.g. `CHK06` PDP character/numeral height under Rule 7 Table-I vs `CHK06b` Net Quantity specific numeral height under Rule 7) remain itemized as distinct findings in the UI list.

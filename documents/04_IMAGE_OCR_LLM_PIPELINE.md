@@ -133,19 +133,31 @@ Packages captured in the field frequently exhibit perspective skew due to viewin
 
 ## 4. Cloud OCR Pipeline Abstraction & Fallback Resilience
 
-NiyamNetra abstracts OCR behind a pluggable interface (`ocr/` and `ocr_engine.py`) designed for zero-RAM local footprint and resilient cloud fallback:
+NiyamNetra abstracts OCR behind a pluggable interface (`ocr/` and `ocr_engine.py`) designed for zero-RAM local footprint, resilient cloud fallback, and leak-free operational diagnostics:
 
-### 4.1 Configured Fallback Order
-When `OCR_PROVIDER="auto"` (default), the `FallbackOCRProvider` executes candidate providers in strict priority order:
-1. **Google Cloud Vision (Primary):** Highest accuracy for Latin and Devanagari script, word-level bounding polygons, and dense numeral typography.
-2. **OCR.space (Secondary):** Cloud API fallback triggered upon Google Vision quota exhaustion, network timeout, or HTTP 5xx errors.
-3. **Azure Vision (Tertiary):** Additional enterprise cloud fallback for multi-provider resilience.
+### 4.1 Provider Selection & Fallback Order
+- **Selection Modes (`OCR_PROVIDER`):**
+  - `auto` (Default): Evaluates candidate providers through `FallbackOCRProvider` in strict sequence:
+    1. **Google Cloud Vision (Primary):** Highest accuracy for Latin and Devanagari script, word-level bounding polygons, and dense numeral typography.
+    2. **OCR.space (Secondary):** Cloud API fallback triggered upon Google Vision quota exhaustion, network timeout, or HTTP 5xx errors.
+    3. **Azure Vision (Tertiary):** Enterprise cloud fallback for multi-provider resilience.
+  - `explicit`: Targets a specific single provider (e.g. `google_vision`, `ocr_space`, `azure`). If the named provider is unsupported or invalid, diagnostics flag `readiness: invalid_configuration` and `verification_status: unsupported_provider`.
+- **Credential Pre-Flight Checks:** If a configured candidate's required API key or service account is absent, the fallback provider skips it safely without unhandled crashes.
 
-### 4.2 Failure Handling, Timeout Discipline & Sanitized Errors
+### 4.2 Failure Classification, Timeout Discipline & Sanitized Errors
 - **Connection & Read Timeouts:** Outbound provider HTTP requests enforce strict timeouts (default 10.0s connect, 25.0s read) via `httpx`.
-- **Status Classification:** Responses are categorized into standard statuses: `STATUS_SUCCESS`, `STATUS_TIMEOUT`, `STATUS_RATE_LIMITED`, `STATUS_PROVIDER_ERROR`, `STATUS_AUTH_ERROR`, `STATUS_NO_TEXT`, or `STATUS_UNAVAILABLE`.
-- **Credential & Secret Scrubbing:** Provider error messages are strictly sanitized via `sanitize_sensitive_text()` before logging or client transmission, removing API keys, bearer tokens, and internal URL paths.
-- **Circuit Protection:** Failed providers in a chain are logged with execution duration and failure reason, seamlessly delegating to the next candidate without terminating the assessment.
+- **Diagnostic Error Categorization (`classify_provider_error`):** Structured error classification distinguishes failure modes:
+  - `auth_error`: HTTP 401/403, invalid credentials, or missing authentication.
+  - `billing_error`: Cloud billing account disabled, suspended, or payment failure.
+  - `rate_limited`: HTTP 429 quota exhaustion or concurrency rate throttling.
+  - `timeout`: Network connection or read timeout.
+  - `network_error`: DNS resolution failure, connection drop, or unreachable gateway.
+  - `all_failed`: All candidates in the fallback chain exhausted without a valid result.
+  - `provider_error`: Upstream 5xx internal server errors.
+- **Credential & Secret Scrubbing:** Error messages, exception tracebacks, and operational logs pass through `sanitize_sensitive_text()`. Regex scrubbers replace API keys (`apikey=...`, `key=...`), Authorization Bearer tokens, and sensitive query parameters with `[REDACTED]`.
+- **Safe Telemetry in `/health` (`get_ocr_health_diagnostics`):** Exposes operational readiness (`unconfigured`, `ready_unverified`, `live_verified`, `degraded`, `all_failed`, `unauthorized`, `billing_error`) and provider priority list without exposing secret values.
+- **Operational Boundary:** A healthy `/health` endpoint proves backend service responsiveness; it does **not** certify that full live OCR ➔ LLM ➔ deterministic rules processing has succeeded on live external APIs.
+- **Pending Credential Rotation:** The OCR.space credential previously exposed in historical commits requires authorized manual rotation in the Render environment configuration.
 
 ### 4.3 The Legal Safety Invariant
 > **Critical Statutory Principle:** An optical character recognition failure or cloud provider outage must **NEVER** be converted into a false legal violation against a merchant.
@@ -155,12 +167,31 @@ When all OCR providers fail, time out, or return unreadable text:
 - Dependent checks are stamped `not_assessed` with explicit reasons (e.g. *"Technical OCR/provider error: All candidate OCR providers failed"*).
 - The scan is routed to the Officer Review Queue under the `technical_recovery` subtype.
 - Officers can trigger technical reassessment or upload a clearer capture without initiating prosecution notices.
+- Unaffected panels or independent evidence sources still support the rules that genuinely can be evaluated.
 
-### 4.4 Output Schema (`OcrResult`)
+### 4.4 Evidence Cache Invalidation Invariant
+- **Cache Fingerprint Gate (`assessment_input_fingerprint`):** The assessment engine checks evidence set integrity before reusing cached OCR or LLM results.
+- **Automatic Purge:** Uploading a new panel image, replacing an existing panel, or updating geometry parameters purges `ocr_cache_hash` and invalidates cached findings.
+- **Failed Invalidation:** Failed OCR or LLM results are strictly prohibited from entering persistent success caches; they cannot be reused as successful assessments.
+
+### 4.5 Output Schema (`OcrResult`)
 - `full_text`: Concatenated plain text of all recognized lines.
 - `lines`: Array of line objects (`OcrLine`) with normalized text and polygon coordinates.
 - `words`: Array of individual words (`OcrWord`) with bounding boxes `[ymin, xmin, ymax, xmax]` normalized to image dimensions.
 - `mean_confidence`: Average optical recognition confidence (0.0 to 1.0).
+
+### 4.6 Runtime Dependency Profiles & Docker Deployment
+- **Cloud-First Render Profile (`requirements-render.txt`):**
+  - Optimized for 512 MB RAM footprint constraints on cloud container tiers.
+  - Excludes heavy native vision and local OCR binaries (`paddlepaddle`, `tesseract-ocr`, `pyzbar`).
+  - Employs lightweight HTTP client and headless image libraries (`httpx`, `opencv-python-headless`).
+  - *Cloud Key Mandate:* At least one cloud provider API key (`GOOGLE_VISION_API_KEY`, `OCR_SPACE_API_KEY`, or `AZURE_VISION_KEY` / `AZURE_VISION_ENDPOINT`) must be defined in the hosting environment (`.env` or Render dashboard). If no cloud provider key is configured, the pipeline safely falls back to honest `not_assessed` rather than triggering runtime crashes or false violations.
+- **Docker Container Local OCR Profile (`Backend/Dockerfile`):**
+  - For standalone container deployments requiring local OCR without outbound cloud dependencies:
+    - Base system packages: `apt-get install -y tesseract-ocr libzbar0`
+    - Python runtime libraries: `pytesseract` and `pyzbar` for local multi-lingual OCR (`eng+hin`) and 1D/2D barcode symbol decoding.
+- **Provider Smoke Testing Tooling:**
+  - Verification CLI: `python scripts/smoke_ocr_provider.py <image.jpg> --live-provider-call` (detailed in Section 8) confirms provider reachability, credentials, and normalized token coordinates against live endpoints.
 
 ---
 

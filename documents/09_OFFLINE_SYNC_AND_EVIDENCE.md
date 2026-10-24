@@ -93,6 +93,10 @@ If a client re-transmits an image upload that was already ingested:
 - It queries `scan_images` for `scan_id == current_scan.id AND sha256 == incoming_sha`.
 - If an exact match exists, the server returns the existing `image_id` with `status: 200 OK` and `"replayed": true`, preventing duplicate rows in the immutable evidence ledger.
 
+### 3.3 Evidence Freshness & Draft Resumption Restoration
+- **Evidence Binding on Draft Resumption:** Resuming an incomplete inspection restores previous panel captures, thumbnail mappings, and image metadata directly from server records. Stable component keys prevent thumbnail swaps during navigation.
+- **Cache Invalidation on Evidence Mutation:** If an officer captures a clearer photo or replaces an existing panel, the server clears `ocr_cache_hash` on the scan record and invalidates the cached `assessment_input_fingerprint`. This guarantees that subsequent assessments evaluate the latest evidence set and prevents stale findings from being reused.
+
 ---
 
 ## 4. Clock Skew Tracking & Temporal Integrity

@@ -172,6 +172,8 @@ OCR_PROVIDER_CHAIN=google_vision,ocr_space,azure
 GOOGLE_APPLICATION_CREDENTIALS=<path_to_service_account_json_on_server>
 GOOGLE_VISION_API_KEY=<optional_api_key_on_server>
 # 2. OCR.space (Secondary Fallback)
+# NOTE: Authorized administrator must rotate OCR_SPACE_API_KEY on Render Dashboard
+# prior to production release due to historical credential exposure.
 OCR_SPACE_API_KEY=<set_on_server>
 # 3. Azure Computer Vision (Tertiary Fallback)
 AZURE_VISION_KEY=<set_on_server>
@@ -189,6 +191,13 @@ GEMINI_MODEL=gemini-1.5-flash
 CORS_ORIGIN_REGEX=^https:\/\/.*\.vercel\.app$|^https:\/\/.*\.onrender\.com$
 MAX_UPLOAD_MB=25
 ```
+
+> [!WARNING]
+> **Operational Verification Distinction:**
+> A successful HTTP 200 from `GET /health` indicates that database connectivity, migrations, and required provider environment keys are configured. It **does not** prove that external cloud OCR, LLM extraction, or legal assessment executed successfully end-to-end. Live provider validation requires real image processing checks against active cloud endpoints.
+>
+> **Pending Administrator Action:**
+> The OCR.space credential exposed in earlier repository commits must be rotated in the upstream provider account and updated in the Render environment variables settings. This action is pending administrator confirmation.
 
 ### 4.2 Web Portal Variables (`Frontend_Portal/.env`)
 

@@ -32,7 +32,7 @@ To ensure credibility with enforcement authorities, NiyamNetra explicitly docume
 - **Country of Origin (`CHK20`):** Enforces country of origin declarations on imported commodities under Rule 6(1)(m).
 
 ### 1.2 Automated Visual & Typography Checks
-- **Numeral Height by PDP Area (`CHK06` & `CHK06b`):** Mathematically maps Principal Display Panel area ($A$) to minimum numeral height under **Rule 7 Table-I** (1.0 mm to 6.0 mm).
+- **Numeral & Character Height (`CHK06` & `CHK06b`):** Mathematically maps Principal Display Panel area ($A$) to minimum character height under **Rule 7 Table-I** (1.0 mm to 6.0 mm) via `CHK06`, while `CHK06b` evaluates the Net Quantity declaration's specific minimum numeral height keyed to quantity.
 - **Letter Height of Accompanying Units (`CHK07`):** Verifies unit symbol height proportionality under Rule 7(3).
 - **Declaration Grouping & Prominence (`CHK08`, `CHK09`, `CHK22`):** Checks grouping on PDP and background contrast under Rules 8 & 9.
 

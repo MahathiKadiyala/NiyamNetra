@@ -304,20 +304,22 @@ Returns detailed review docket for a specific inspection, including multi-panel 
 - **Auth Required:** Bearer Token (owner or admin).
 - **Response (`200 OK`):** Detailed review object with per-scan findings and audit history.
 
-### `POST /review/adjudicate`
-Records an authorized officer override or confirmation without altering `engine_verdict`.
+### `POST /review/inspections/{inspection_id}/adjudicate`
+Records an authorized officer adjudication on an inspection or individual finding without altering `engine_verdict`.
 - **Auth Required:** Bearer Token (`inspector` or `admin`).
+- **Path Parameter:** `inspection_id` (integer).
 - **Request Body:**
   ```json
   {
-    "inspection_id": 70,
-    "finding_id": 214,
     "action": "override",
+    "reason": "Manufacturer registered with DCA under central exemption ref 2026/LMA/12",
+    "finding_id": 214,
     "human_verdict": "pass",
-    "reason": "Manufacturer registered with DCA under central exemption ref 2026/LMA/12"
+    "resolution_notes": "Verified exemption documentation presented by store manager"
   }
   ```
-- **Response (`200 OK`):** Updated finding with human adjudication and cryptographic audit record.
+  *(To resolve an inspection at the docket level, set `"action": "resolve"` with a mandatory `"reason"` $\ge 10$ characters).*
+- **Response (`200 OK`):** Updated finding or inspection adjudication summary with cryptographic audit record.
 
 ---
 
@@ -365,7 +367,7 @@ Generates cryptographically signed official PDF inspection docket.
 - **Response (`200 OK`):** Binary `application/pdf` stream.
 
 ### `GET /health`
-Public system health, database engine status, and active statutory rule pack diagnostics.
+Public system health, database engine status, active statutory rule pack diagnostics, and sanitized OCR operational readiness.
 - **Auth Required:** None (Public).
 - **Response (`200 OK`):**
   ```json
@@ -387,6 +389,26 @@ Public system health, database engine status, and active statutory rule pack dia
     "db_engine": "postgresql",
     "db_error": null,
     "evidence_free_gb": 42.85,
-    "evidence_low": false
+    "evidence_low": false,
+    "ocr_diagnostics": {
+      "provider_selection_mode": "auto",
+      "selected_provider": "auto",
+      "configured": true,
+      "live_verified": false,
+      "readiness": "ready_unverified",
+      "verification_status": "configured_not_live_verified",
+      "verification_source": "none",
+      "fallback_occurred": false,
+      "last_error_category": null,
+      "last_attempted_providers": [],
+      "providers": [
+        {"name": "google_vision", "configured": true, "priority": 1, "last_status": "unverified"},
+        {"name": "ocr_space", "configured": true, "priority": 2, "last_status": "unverified"},
+        {"name": "azure", "configured": false, "priority": 3, "last_status": "unverified"}
+      ],
+      "coverage_note": "OCR configuration does not guarantee live cloud service reachability"
+    }
   }
   ```
+
+> **Operational Health Boundary:** A `200 OK` status from `/health` confirms backend service availability, database connectivity, and configuration presence. It does **not** prove that external cloud OCR, LLM extraction, or legal rules have been verified through live external provider calls. Real external calls are intentionally decoupled to prevent quota exhaustion and require separate manual verification.

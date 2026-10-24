@@ -89,13 +89,13 @@ NiyamNetra is engineered around a strict separation of concerns designed to elim
 │             (Python 3.11 · Rule Pack 2026.09.v1 · Fourth Amendment G.S.R. 826(E))           │
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
 │  • 26 Statutory Rules: 19 executable algorithmic checks + 7 manual-review/advisory checks   │
-│  • Denominator Contract: checks_total = 19; pass + fail + not_assessed == total == 19       │
+│  • Denominator Contract: total_findings = pass + fail + not_assessed; checks_assessed = pass + fail │
 │  • Rule 7 Table-I: Millimeter font height validation based on Area of Principal Display     │
 │  • Multi-Panel Synthesis: Cross-panel conflict detection, dual pricing, MRP sticker check   │
 └───────────────────────────────────────────────┬─────────────────────────────────────────────┘
                                                 │
                      ┌──────────────────────────┼──────────────────────────┐
-                     │ (All 19 Executable Pass) │ (Gaps / Blur / Outage)   │ (Confirmed Defect)
+                     │ (All Applicable Pass)    │ (Gaps / Blur / Outage)   │ (Confirmed Defect)
                      ▼                          ▼                          ▼
             ┌─────────────────┐       ┌───────────────────┐       ┌───────────────────┐
             │    COMPLIANT    │       │  REVIEW_REQUIRED  │       │     VIOLATION     │
@@ -146,6 +146,8 @@ NiyamNetra is engineered around a strict separation of concerns designed to elim
 - **Target OS:** Android 7.0 (API 24) through Android 16 (API 36); fully aligned for Android 15 16 KB memory page sizes.
 - **Hardware Integration:** Direct `expo-camera` access (no gallery picker to eliminate pre-staged photo fraud), `expo-location` for store geofencing, `expo-secure-store` for cryptographic token storage.
 - **Client Processing:** Performs instant heuristic quality analysis (blur, glare, luma histogram) and generates the derived analysis JPEG prior to transmission.
+- **Evidence Thumbnail Rendering (`EvidenceThumbnail`):** Binds server-returned evidence records (`ScanImage`) to panel-specific thumbnails (`front`, `back`, `side`, `mrp`, `batch`) using stable React element keys. Handles relative image URLs dynamically, executes authenticated image fetching without exposing raw bearer tokens in URLs, manages loading/error/retry states gracefully, and enforces cross-scan state isolation.
+- **Data-Driven Assessment UI:** Mobile findings and counter badges derive strictly from backend API responses (`ScanOut`), accurately reflecting completed assessments, confirmed violations, technical OCR recovery, unreadable evidence, recapture requirements, loading, and request failure states. Null fields remain unknown (no fabricated product metadata), and session generation guards prevent stale in-flight responses from overwriting current scan findings.
 - **Offline Engine:** Local SQLite storage with automatic background synchronization via an idempotent retry queue.
 
 #### 2. Supervisory Web Portal (`Frontend_Portal`)
@@ -275,14 +277,23 @@ The active rule pack baseline (`rules/rule_packs/lmpc_2026_09_v1.json`) incorpor
 - **7 Manual-Review & Advisory Rules:** Rules addressing discretionary or policy-based checks (such as cosmetic origin symbol enforcement under Rule 6(4A)(d) where statutory enforceability under Section 36(1) is subject to administrative adjudication).
 
 ### 8.2 Invariant Counting Contract
-The platform maintains strict arithmetic relationships across every scan and inspection verdict:
-$$\text{checks\_total} = 19$$
-$$\text{checks\_assessed} = \text{passed} + \text{failed}$$
-$$\text{not\_assessed} = \text{checks\_total} - \text{checks\_assessed}$$
-$$\text{total\_findings} = \text{passed} + \text{failed} + \text{not\_assessed} = \text{checks\_total} = 19$$
+The platform maintains strict arithmetic relationships across every scan and inspection verdict, aligning the backend response builder, rule aggregation, and frontend UI displays:
+$$\text{total\_findings} = \text{pass\_count} + \text{fail\_count} + \text{not\_assessed\_count}$$
+$$\text{checks\_assessed} = \text{pass\_count} + \text{fail\_count}$$
+$$\text{not\_assessed\_count} = \text{total\_findings} - \text{checks\_assessed}$$
 
-A package is stamped `compliant` if and only if:
-$$\text{checks\_assessed} = 19 \quad \land \quad \text{failed} = 0 \quad \land \quad \text{not\_assessed} = 0$$
+These metrics maintain strict conceptual separation:
+- **Total Registered Rule Catalog:** 26 rules defined in `lmpc_2026_09_v1.json`.
+- **Executable Rule Count:** 19 algorithmic checks defined by the active rule pack (`lmpc_2026_09_v1`).
+- **Manual-Review / Advisory Rules:** 7 subjective or policy-related catalog rules.
+- **Scan Findings Returned (`total_findings`):** Itemized findings evaluated and returned for the particular scan. A full applicable assessment can return 19 findings, whereas a partially applicable assessment may return fewer based on commodity classification or packaging scope.
+- **Assessed Checks (`checks_assessed`):** Checks evaluated with a definitive statutory verdict (`pass` or `fail`).
+- **Not-Assessed Findings (`not_assessed_count`):** Findings that remain not assessed due to missing panels, unreadable text, OCR provider failure, or uncalibrated optical scale.
 
-Any missing panel, uncalibrated scale, or optical failure forces $\text{not\_assessed} > 0$, preventing false compliance declarations.
+**Check Identity Invariant:** Distinct check identities remain unmerged in findings. For example, `CHK06` (Principal Display Panel character height under Rule 7 Table-I) and `CHK06b` (Net Quantity declaration specific numeral height under Rule 7) evaluate distinct statutory requirements and are never collapsed into a single finding. Multi-panel deduplication strictly enforces that a definitive failure (`fail`) outranks a pass, and pass outranks not-assessed on identical check identities.
+
+A package is stamped `compliant` if and only if all returned applicable checks are assessed without failure:
+$$\text{checks\_assessed} = \text{total\_findings} \quad \land \quad \text{fail\_count} = 0 \quad \land \quad \text{not\_assessed\_count} = 0$$
+
+(In a full 19-check assessment, $\text{checks\_assessed} = \text{total\_findings} = 19$). Any missing panel, uncalibrated scale, or optical failure forces $\text{not\_assessed\_count} > 0$, preventing false compliance declarations.
 

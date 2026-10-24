@@ -7,8 +7,8 @@
 [![Web Portal](https://img.shields.io/badge/Web_Portal-Vercel_SPA-black?logo=vercel)](https://niyamnetra-legal-metrology-rules.vercel.app)
 [![Release APK](https://img.shields.io/badge/Release_APK-v1.0.4_(Build_5)-success?logo=android)](release/NiyamNetra-v1.0.4-release.apk)
 [![Rules Pack](https://img.shields.io/badge/Statutory_Pack-2026.09.v1_(26_Rules)-blue)](documents/05_LEGAL_COMPLIANCE_ENGINE.md)
-[![Backend Tests](https://img.shields.io/badge/Backend_Tests-568_Collected-009688)](documents/10_TESTING_AND_QUALITY.md)
-[![Frontend Tests](https://img.shields.io/badge/Frontend_Tests-228_Passed_(8_Suites)-brightgreen)](documents/10_TESTING_AND_QUALITY.md)
+[![Backend Tests](https://img.shields.io/badge/Backend_Tests-598_Collected-009688)](documents/10_TESTING_AND_QUALITY.md)
+[![Frontend Tests](https://img.shields.io/badge/Frontend_Tests-254_Passed_(9_Suites)-brightgreen)](documents/10_TESTING_AND_QUALITY.md)
 
 > [!IMPORTANT]
 > **The Core System Invariant:**  
@@ -119,7 +119,7 @@ The following pure-markdown schematic illustrates NiyamNetra's complete data jou
 └───────────────────────────────────────────────┬─────────────────────────────────────────────┘
                                                 │
                      ┌──────────────────────────┼──────────────────────────┐
-                     │ (All 26 Pass)            │ (Gaps / Blur)            │ (Confirmed Defect)
+                     │ (All Checks Pass)        │ (Gaps / Blur)            │ (Confirmed Defect)
                      ▼                          ▼                          ▼
             ┌─────────────────┐       ┌───────────────────┐       ┌───────────────────┐
             │    COMPLIANT    │       │  REVIEW_REQUIRED  │       │     VIOLATION     │
@@ -196,30 +196,27 @@ The following pure-markdown schematic illustrates NiyamNetra's complete data jou
 ## 6. Repository Structure
 
 ```text
-├── README.md                      # Primary repository entry point
-├── documents/                     # Authoritative comprehensive documentation
-│   ├── 00_PROJECT_BRIEF.md        # 2-minute executive brief
-│   ├── 01_PRODUCT_SCOPE.md        # Functional boundaries & personas
-│   ├── 02_SYSTEM_ARCHITECTURE.md  # Detailed technical architecture
-│   ├── 03_INSPECTOR_WORKFLOW.md   # Field officer user journeys
-│   ├── 04_IMAGE_OCR_LLM_PIPELINE.md # Dual-artifact & AI pipeline
-│   ├── 05_LEGAL_COMPLIANCE_ENGINE.md# 26 statutory rules & Table-I logic
-│   ├── 06_DATA_MODEL.md           # 12 SQLAlchemy models & migrations
-│   ├── 07_API_AND_INTEGRATION.md  # REST API specification
-│   ├── 08_SECURITY_AND_PRIVACY.md # Threat model & tamper-evident chain
-│   ├── 09_OFFLINE_SYNC_AND_EVIDENCE.md # Offline queue & idempotency
-│   ├── 10_TESTING_AND_QUALITY.md  # Test suites (568 backend collected, 228 frontend assertions passing)
-│   ├── 11_DEPLOYMENT_AND_ENVIRONMENT.md # Deployment runbook & env vars
-│   ├── 12_RULE_COVERAGE_AND_LIMITATIONS.md # Rule coverage & limits
-│   ├── 13_RELEASE_AND_OPERATIONS.md# Release docket & health checks
-│   ├── 14_DEMO_AND_PRESENTATION.md# Presentation script & judge Q&A
-│   ├── 15_SAFE_DATA_AUDIT.md      # Read-only stale data audit guide
-│   ├── 16_FINAL_PRESENTATION_DECK.md # Stage & jury presentation deck (8 slides)
-│   └── archive/                   # Historical engineering records and adversarial audits
-├── Backend/                       # FastAPI application & statutory engine
-├── Frontend_App/                  # React Native / Expo field mobile application
-├── Frontend_Portal/               # React 18 / Vite supervisory web dashboard
-└── release/                       # Production release APK artifacts
+├── README.md                                   # Primary repository entry point
+├── documents/                                  # Authoritative comprehensive documentation
+│   ├── 00_PROJECT_BRIEF.md                     # 2-minute executive brief
+│   ├── 01_PRODUCT_SCOPE.md                     # Functional boundaries & personas
+│   ├── 02_SYSTEM_ARCHITECTURE.md               # Detailed technical architecture
+│   ├── 03_INSPECTOR_WORKFLOW.md                # Field Officer user journeys
+│   ├── 04_IMAGE_OCR_LLM_PIPELINE.md            # Dual-artifact & AI pipeline
+│   ├── 05_LEGAL_COMPLIANCE_ENGINE.md           # 26 statutory rules & Table-I logic
+│   ├── 06_DATA_MODEL.md                        # 12 SQLAlchemy models & migrations
+│   ├── 07_API_AND_INTEGRATION.md               # REST API specification
+│   ├── 08_SECURITY_AND_PRIVACY.md              # Threat model & tamper-evident chain
+│   ├── 09_OFFLINE_SYNC_AND_EVIDENCE.md         # Offline queue & idempotency
+│   ├── 10_TESTING_AND_QUALITY.md               # Test suites (598 backend collected, 145 targeted regression passed, 254 frontend assertions passing across 9 suites)
+│   ├── 11_DEPLOYMENT_AND_ENVIRONMENT.md        # Deployment runbook & env vars
+│   ├── 12_RULE_COVERAGE_AND_LIMITATIONS.md     # Rule coverage & limits
+│   ├── 13_RELEASE_AND_OPERATIONS.md            # Release docket & health checks
+│   └── 14_DEMO_AND_PRESENTATION.md             # Presentation script & judge Q&A
+├── Backend/                                    # FastAPI application & statutory engine
+├── Frontend_App/                               # React Native / Expo field mobile application
+├── Frontend_Portal/                            # React 18 / Vite supervisory web dashboard
+└── release/                                    # Production release APK artifacts
 
 ```
 
@@ -293,14 +290,11 @@ For detailed architectural, statutory, and operational specifications, consult t
 - [**07_API_AND_INTEGRATION.md**](documents/07_API_AND_INTEGRATION.md): Complete OpenAPI 3.1 endpoint reference.
 - [**08_SECURITY_AND_PRIVACY.md**](documents/08_SECURITY_AND_PRIVACY.md): Threat model (T1–T15), cryptographic evidence chain, and DPDP Act.
 - [**09_OFFLINE_SYNC_AND_EVIDENCE.md**](documents/09_OFFLINE_SYNC_AND_EVIDENCE.md): Local SQLite queues, idempotency, and clock skew tracking.
-- [**10_TESTING_AND_QUALITY.md**](documents/10_TESTING_AND_QUALITY.md): Test methodology & suites (568 backend collected, 428 release baseline, 228 frontend assertions passing across 8 suites).
+- [**10_TESTING_AND_QUALITY.md**](documents/10_TESTING_AND_QUALITY.md): Test methodology & suites (598 backend collected, 428 release baseline, 145 targeted regression passed, 254 frontend assertions passing across 9 suites).
 - [**11_DEPLOYMENT_AND_ENVIRONMENT.md**](documents/11_DEPLOYMENT_AND_ENVIRONMENT.md): Production deployment runbook & sanitized environment variables.
 - [**12_RULE_COVERAGE_AND_LIMITATIONS.md**](documents/12_RULE_COVERAGE_AND_LIMITATIONS.md): Exact statutory coverage and physical constraints.
 - [**13_RELEASE_AND_OPERATIONS.md**](documents/13_RELEASE_AND_OPERATIONS.md): Operational runbook, health verification, and release gates.
 - [**14_DEMO_AND_PRESENTATION.md**](documents/14_DEMO_AND_PRESENTATION.md): Live demo storyline, key talking points, and evaluator Q&A.
-- [**15_SAFE_DATA_AUDIT.md**](documents/15_SAFE_DATA_AUDIT.md): Read-only stale records audit, classification taxonomy, and zero-mutation data hygiene.
-- [**16_FINAL_PRESENTATION_DECK.md**](documents/16_FINAL_PRESENTATION_DECK.md): Slide-by-slide stage & jury presentation deck with verified statutory metrics.
-- [**archive/**](documents/archive/): Historical engineering baselines and adversarial analysis.
 
 
 ---
@@ -308,10 +302,12 @@ For detailed architectural, statutory, and operational specifications, consult t
 ## 11. Testing & Verification
 
 NiyamNetra maintains rigorous test coverage across backend and mobile edge clients:
-- **Backend Test Suite:** **568 automated tests collected** across 35 test files (`pytest --collect-only -q`). Recorded release baseline verified **428 passed, 0 failed** (`pytest -q`), with 140 regression tests subsequently added across Modules 5.1–7.5 (cache validation, review queue subtypes, counting contracts, provider fallback, and safe data audits).
-- **Frontend Test Suite:** **228 assertions passed, 0 failed** across all 8 test suites (`node run_all_tests.js` in `Frontend_App`).
+- **Backend Test Discovery:** **598 automated tests collected** across 48 test modules (`pytest --collect-only -q`).
+- **Targeted Regression Suite:** **145 passed, 0 failed, 0 skipped** across core regression modules in Module 11 (`test_e2e_inspection_workflow_regression.py`, `test_secure_provider_diagnostics.py`, finalization, cache validation, review queue, and OCR fallback).
+- **Recorded Release Baseline:** **428 passed, 0 failed** in 100.43s.
+- **Frontend Test Suite:** **254 assertions passed, 0 failed** across all 9 test suites (`node run_all_tests.js` in `Frontend_App`).
 - **E2E Integration Scenarios:** 10 canonical scenarios passing (`test_phase6e_e2e_scenarios.py`).
-- **Hardware Verified:** Installed and verified on physical Android hardware across clean install and upgrade flows.
+- **Operational & Hardware Verification Boundaries:** Automated integration tests execute through application orchestration with controlled test doubles for paid OCR and LLM APIs to avoid cloud charges. Live cloud OCR verification and physical Android hardware testing require separate execution per the manual checklist in [`documents/13_RELEASE_AND_OPERATIONS.md`](documents/13_RELEASE_AND_OPERATIONS.md).
 
 ---
 
