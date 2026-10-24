@@ -631,6 +631,40 @@ def test_incompatible_reason_and_subtype_returns_422():
     assert r3.status_code == 422
 
 
+def test_adjudicate_root_missing_inspection_id_returns_422():
+    """Missing inspection_id in /review/adjudicate body returns HTTP 422."""
+    env = _setup_test_env()
+    client, admin = env["client"], env["admin"]
+    headers = _auth(admin)
+
+    resp = client.post(
+        "/review/adjudicate",
+        json={"action": "resolve", "reason": "Valid reason exceeding ten chars"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert "inspection_id required in request body" in resp.json()["detail"]
+
+
+def test_resolve_conflict_root_missing_inspection_id_returns_422():
+    """Missing inspection_id in /review/resolve-conflict body returns HTTP 422."""
+    env = _setup_test_env()
+    client, admin = env["client"], env["admin"]
+    headers = _auth(admin)
+
+    resp = client.post(
+        "/review/resolve-conflict",
+        json={
+            "conflict_id": "CONFLICT-001",
+            "resolution": "dismiss",
+            "reason": "Valid reason exceeding ten chars",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert "inspection_id required in request body" in resp.json()["detail"]
+
+
 def test_compatible_reason_and_subtype_succeeds():
     """Compatible reason and subtype combinations succeed."""
     env = _setup_test_env()
