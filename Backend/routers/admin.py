@@ -222,7 +222,6 @@ def get_admin_violations(
 @router.get("/rule-versions", response_model=list[RuleVersionOut])
 def get_rule_versions(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Statutory catalog timeline for Legal Metrology Rules amendments."""
-    RuleVersionState.__table__.create(db.bind, checkfirst=True)
     states = {s.id: s.is_active for s in db.query(RuleVersionState).all()}
 
     defaults = [
@@ -324,7 +323,6 @@ def toggle_rule_version(
     db: Session = Depends(get_db),
 ):
     """Toggle a statutory rule version Active/Inactive state with audit logging."""
-    RuleVersionState.__table__.create(db.bind, checkfirst=True)
     st = db.query(RuleVersionState).filter(RuleVersionState.id == version_id).first()
     if not st:
         st = RuleVersionState(id=version_id, is_active=body.is_active)
