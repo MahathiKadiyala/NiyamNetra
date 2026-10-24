@@ -57,8 +57,9 @@ export function AuthProvider({ children }) {
       try { await clearReviewQueueCache(); } catch {}
       setCurrentUser(null);
       setRole(null);
-      deleteItem(ACCESS_KEY);
-      deleteItem('nn_user_profile');
+      await deleteItem(ACCESS_KEY);
+      await deleteItem('nn_refresh');
+      await deleteItem('nn_user_profile');
     });
     (async () => {
       // try/finally guarantees isLoading is cleared even if storage or the
@@ -92,21 +93,56 @@ export function AuthProvider({ children }) {
                 setRole(r);
                 setIsLoading(false);
                 // Best-effort refresh in the background to extend the session.
-                api.post('/auth/refresh', undefined, { timeout: 10000 })
+                const storedRefresh = await getItem('nn_refresh');
+                const refreshPayload = storedRefresh ? { refresh_token: storedRefresh } : undefined;
+                api.post('/auth/refresh', refreshPayload, { timeout: 10000 })
                   .then(async ({ data }) => {
                     if (data?.access_token) {
                       setAccessToken(data.access_token);
-                      setItem(ACCESS_KEY, data.access_token);
+                      await setItem(ACCESS_KEY, data.access_token);
+                      if (data?.refresh_token) {
+                        await setItem('nn_refresh', data.refresh_token);
+                      }
                       setRole(decodeRole(data.access_token));
                       if (data?.user) {
                         setCurrentUser(data.user);
-                        setItem('nn_user_profile', JSON.stringify(data.user));
+                        await setItem('nn_user_profile', JSON.stringify(data.user));
                         await handleAuthorizationScopeChange(data.user);
                       }
                     }
                   })
                   .catch(() => {});
                 return;
+              }
+            }
+
+            // If access token was expired or absent, attempt refresh with stored native refresh token
+            const storedRefresh = await getItem('nn_refresh');
+            if (storedRefresh) {
+              try {
+                const { data } = await api.post('/auth/refresh', { refresh_token: storedRefresh }, { timeout: 10000 });
+                if (data?.access_token) {
+                  setAccessToken(data.access_token);
+                  await setItem(ACCESS_KEY, data.access_token);
+                  if (data?.refresh_token) {
+                    await setItem('nn_refresh', data.refresh_token);
+                  }
+                  if (data?.user) {
+                    setCurrentUser(data.user);
+                    await setItem('nn_user_profile', JSON.stringify(data.user));
+                    await handleAuthorizationScopeChange(data.user);
+                  }
+                  const r = decodeRole(data.access_token);
+                  if (r) {
+                    setRole(r);
+                    return;
+                  }
+                }
+              } catch {
+                // Invalid or expired refresh token: clear local state cleanly
+                await deleteItem(ACCESS_KEY);
+                await deleteItem('nn_refresh');
+                await deleteItem('nn_user_profile');
               }
             }
           }
@@ -144,12 +180,13 @@ export function AuthProvider({ children }) {
 
   const login = async (employee_id, password) => {
     const install_id = await getItem('nn_install_id') || undefined;
+    const client_platform = Platform.OS !== 'web' ? Platform.OS : undefined;
     // 60s, not the shared 30s default: this is the one request that can land on
     // a Render free-tier service that has been spun down, and the first login of
     // a demo is exactly when that happens. A cold start measured at 30-50s would
     // otherwise still time out and show "cannot reach the backend" for a backend
     // that is healthy.
-    const { data } = await api.post('/auth/login', { employee_id, password, install_id }, { timeout: 60000 });
+    const { data } = await api.post('/auth/login', { employee_id, password, install_id, client_platform }, { timeout: 60000 });
     setAccessToken(data.access_token);
     if (data?.user) {
       setCurrentUser(data.user);
@@ -159,35 +196,39 @@ export function AuthProvider({ children }) {
     }
     try { clearReviewQueueCache(null, { legacyOnly: true }); } catch {}
     await setItem('nn_install_id', data.install_id);
-    // Native session restore: the refresh cookie never reaches SecureStore
-    // (httpOnly, web-only), so persist the access token for silent rehydrate
-    // on boot (see the bootstrap effect above). WEB DOES NOT PERSIST: the
-    // fallback store is localStorage (see secureStore.js), which contradicts
-    // the documented memory-only access token (Backend.md C8, 09 T12 XSS) —
-    // on web the httpOnly refresh cookie restores the session instead.
+    // Native session restore: persist access token and refresh token in SecureStore
+    // (WEB DOES NOT PERSIST in localStorage per Backend.md C8 / 09 T12 XSS).
     if (Platform.OS !== 'web') {
       await setItem(ACCESS_KEY, data.access_token);
+      if (data?.refresh_token) {
+        await setItem('nn_refresh', data.refresh_token);
+      }
       if (data?.user) {
         await setItem('nn_user_profile', JSON.stringify(data.user));
       }
     }
-    // The refresh token is only ever set as an httpOnly cookie by the server —
-    // it is never written to SecureStore, which is the point of the cookie.
     setRole(decodeRole(data.access_token));
   };
 
   const logout = async () => {
-    try { await api.post('/auth/logout'); } catch {}
+    try {
+      let logoutPayload = undefined;
+      if (Platform.OS !== 'web') {
+        const storedRefresh = await getItem('nn_refresh');
+        if (storedRefresh) logoutPayload = { refresh_token: storedRefresh };
+      }
+      await api.post('/auth/logout', logoutPayload);
+    } catch {}
     try { await handleAuthorizationScopeChange(null); } catch {}
     try { await clearReviewQueueCache(); } catch {}
     try { bumpReviewCacheSessionId(); } catch {}
     // nn_install_id is DEVICE identity, not session state — keep it so the
-    // next login on this phone re-binds the same install record. Only the
-    // in-memory token + role are cleared here (refresh cookie is cleared
-    // server-side by /auth/logout).
+    // next login on this phone re-binds the same install record. Local tokens
+    // are purged and server token_epoch is bumped to revoke refresh tokens.
     setAccessToken(null);
     setCurrentUser(null);
     await deleteItem(ACCESS_KEY);
+    await deleteItem('nn_refresh');
     await deleteItem('nn_user_profile');
     setRole(null);
   };

@@ -1,7 +1,8 @@
 """routers/auth.py"""
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from pydantic import BaseModel, Field, field_validator
@@ -15,7 +16,7 @@ from jwt_handler import (
 from models import User
 from password_handler import hash_password, verify_password
 from rbac import get_current_user
-from schemas import LoginRequest, LoginResponse, UserOut
+from schemas import LoginRequest, LoginResponse, LogoutRequest, RefreshRequest, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -88,6 +89,20 @@ def _set_refresh_cookie(resp: Response, token: str) -> None:
     )
 
 
+def _is_native_client(request: Request, body: Any = None) -> bool:
+    platform_header = (
+        request.headers.get("x-client-platform")
+        or request.headers.get("x-platform")
+        or ""
+    ).strip().lower()
+    if platform_header in ("android", "ios", "native", "mobile"):
+        return True
+    if body and hasattr(body, "client_platform") and body.client_platform:
+        if str(body.client_platform).strip().lower() in ("android", "ios", "native", "mobile"):
+            return True
+    return False
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest, request: Request, response: Response,
           db: Session = Depends(get_db)):
@@ -113,7 +128,10 @@ def login(body: LoginRequest, request: Request, response: Response,
 
     access = create_access_token(user.id, user.role, install_id)
     refresh = create_refresh_token(user.id, install_id, user.token_epoch)
-    _set_refresh_cookie(response, refresh)
+
+    is_native = _is_native_client(request, body)
+    if not is_native:
+        _set_refresh_cookie(response, refresh)
 
     append_audit(db, user_id=user.id, action="login", ip_address=_client_ip(request),
                  user_agent=request.headers.get("user-agent", "")[:240])
@@ -123,12 +141,25 @@ def login(body: LoginRequest, request: Request, response: Response,
         expires_in=settings.ACCESS_TOKEN_HOURS * 3600,
         user=UserOut.model_validate(user),
         install_id=install_id,
+        refresh_token=refresh if is_native else None,
     )
 
 
 @router.post("/refresh", response_model=LoginResponse)
-def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
-    raw = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+def refresh_token(
+    request: Request,
+    response: Response,
+    body: RefreshRequest | None = Body(None),
+    db: Session = Depends(get_db),
+):
+    raw = None
+    if body and body.refresh_token:
+        raw = body.refresh_token.strip()
+    elif request.headers.get("x-refresh-token"):
+        raw = request.headers.get("x-refresh-token").strip()
+    else:
+        raw = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+
     if not raw:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="No refresh token")
     try:
@@ -186,22 +217,41 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
     except Exception:
         db.rollback()
 
+    is_native = _is_native_client(request, body)
+    if not is_native and (body and body.refresh_token or request.headers.get("x-refresh-token")):
+        is_native = True
+
     new_refresh = create_refresh_token(user.id, user.install_id, user.token_epoch)
-    _set_refresh_cookie(response, new_refresh)
+    if not is_native:
+        _set_refresh_cookie(response, new_refresh)
+
     return LoginResponse(
         access_token=create_access_token(user.id, user.role, user.install_id),
         expires_in=settings.ACCESS_TOKEN_HOURS * 3600,
         user=UserOut.model_validate(user),
         install_id=user.install_id or "",
+        refresh_token=new_refresh if is_native else None,
     )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+def logout(
+    request: Request,
+    response: Response,
+    body: LogoutRequest | None = Body(None),
+    db: Session = Depends(get_db),
+):
     """Revoke all refresh tokens for this user (token_epoch bump) and clear
     the refresh cookie. Idempotent: with no/invalid cookie the cookie is still
     cleared and no error is raised."""
-    raw = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+    raw = None
+    if body and body.refresh_token:
+        raw = body.refresh_token.strip()
+    elif request.headers.get("x-refresh-token"):
+        raw = request.headers.get("x-refresh-token").strip()
+    else:
+        raw = request.cookies.get(settings.REFRESH_COOKIE_NAME)
+
     if raw:
         try:
             claims = decode_token(raw, expect=REFRESH)

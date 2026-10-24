@@ -12,7 +12,10 @@ const isWeb = Platform.OS === 'web';
 
 export async function getItem(key) {
   try {
-    if (isWeb) return globalThis.localStorage?.getItem(key) ?? null;
+    if (isWeb) {
+      if (key === 'nn_refresh') return null;
+      return globalThis.localStorage?.getItem(key) ?? null;
+    }
     return await SecureStore.getItemAsync(key);
   } catch (e) {
     if (__DEV__) console.warn('[secureStore] getItem failed:', key, e?.message || e);
@@ -24,6 +27,7 @@ export async function setItem(key, value) {
   try {
     if (value == null) return;
     if (isWeb) {
+      if (key === 'nn_refresh') return;
       globalThis.localStorage?.setItem(key, value);
       return;
     }

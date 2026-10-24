@@ -58,6 +58,8 @@ class ORMModel(BaseModel):
 class LoginRequest(BaseModel):
     employee_id: str = Field(min_length=3, max_length=32)
     password: str = Field(min_length=8, max_length=72)
+    install_id: str | None = None
+    client_platform: str | None = None
 
 
 class UserOut(ORMModel):
@@ -79,8 +81,15 @@ class LoginResponse(BaseModel):
     expires_in: int                     # seconds; the client refreshes before this
     user: UserOut
     install_id: str
-    # The refresh token is NOT in this body. It is set as an httpOnly
-    # SameSite=Strict cookie so that no JavaScript in the portal can read it.
+    refresh_token: str | None = None    # populated only for authenticated native mobile clients
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str | None = None
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = None
 
 
 # ------------------------------------------------------------ inspections

@@ -1,5 +1,7 @@
 import axios from 'axios';
+import { Platform } from 'react-native';
 import { ACTIVE_BACKEND, API_BASE_URL, BACKEND_TARGETS, getCustomUrl, loadCustomUrl, loadSavedTarget, saveCustomUrl, saveTarget, targetOf, warnIfCookieHostMismatch } from './config';
+import { getItem, setItem, deleteItem } from '../auth/secureStore';
 
 let accessToken = null;
 export const setAccessToken = (t) => { accessToken = t; };
@@ -32,6 +34,10 @@ function emitSessionExpired() {
   setAccessToken(null);
   setCurrentUser(null);
   emitAuthScopeChanged(null);
+  if (Platform.OS !== 'web') {
+    deleteItem('nn_access').catch(() => {});
+    deleteItem('nn_refresh').catch(() => {});
+  }
   sessionListeners.forEach((cb) => { try { cb(); } catch { /* listener must not throw */ } });
 }
 
@@ -127,6 +133,9 @@ if (__DEV__) console.log('[NiyamNetra] API base URL =', api.defaults.baseURL);
 api.interceptors.request.use((cfg) => {
   cfg.headers = cfg.headers || {};
   if (accessToken) cfg.headers.Authorization = `Bearer ${accessToken}`;
+  if (Platform.OS && Platform.OS !== 'web') {
+    cfg.headers['X-Client-Platform'] = Platform.OS;
+  }
   // Idempotency-Key for every write 11 §2.4
   if (['post', 'patch', 'put'].includes((cfg.method || '').toLowerCase())) {
     cfg.headers['Idempotency-Key'] = cfg.headers['Idempotency-Key'] || idempotencyKey();
@@ -176,14 +185,28 @@ api.interceptors.response.use(null, async (err) => {
   orig._retried = true;
 
   if (!refreshing) {
-    refreshing = api.post('/auth/refresh').then(r => {
+    refreshing = (async () => {
+      let refreshPayload = undefined;
+      if (Platform.OS !== 'web') {
+        const storedRefreshToken = await getItem('nn_refresh');
+        if (storedRefreshToken) {
+          refreshPayload = { refresh_token: storedRefreshToken };
+        }
+      }
+      const r = await api.post('/auth/refresh', refreshPayload);
       setAccessToken(r.data.access_token);
+      if (Platform.OS !== 'web') {
+        await setItem('nn_access', r.data.access_token);
+        if (r.data?.refresh_token) {
+          await setItem('nn_refresh', r.data.refresh_token);
+        }
+      }
       if (r.data?.user) {
         setCurrentUser(r.data.user);
         emitAuthScopeChanged(r.data.user);
       }
       return r.data.access_token;
-    }).catch(e => { throw e; }).finally(() => { refreshing = null; });
+    })().catch(e => { throw e; }).finally(() => { refreshing = null; });
   }
   try {
     const tok = await refreshing;
