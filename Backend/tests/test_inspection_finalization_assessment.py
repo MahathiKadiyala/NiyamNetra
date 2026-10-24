@@ -509,58 +509,73 @@ def test_finalize_multiple_mixed_scans(test_setup):
     p1, r1, sha1 = _make_dummy_image("Aashirvaad Shudh Chakki Atta 10kg")
     db.add(ScanImage(scan_id=s1.id, panel="front", file_path=p1, sha256=sha1, width_px=600, height_px=800, byte_size=len(r1), mime_type="image/jpeg"))
     db.commit()
-    client.post(f"/scans/{s1.id}/assess")
 
-    # Scan 2: Unassessed with image (evaluated)
-    s2 = Scan(
-        inspection_id=insp_id,
-        commodity_generic="Salt",
-        brand_name="Tata Salt",
-        panel_shape="rectangular",
-        scale_source="none",
-        rules_as_at=date(2026, 9, 21),
-        catalog_hash="hash_salt",
-        engine_version="2.0.0",
-        rule_pack_version="2026.09.v1",
-        overall_result="not_assessed",
+    mock_lines = [
+        OcrLine(text="AASHIRVAAD SHUDH CHAKKI ATTA", confidence=0.95, box=[[10, 10], [100, 10], [100, 30], [10, 30]], height_px=14.0),
+        OcrLine(text="NET QTY 10 kg", confidence=0.96, box=[[10, 40], [80, 40], [80, 60], [10, 60]], height_px=12.0),
+        OcrLine(text="MRP Rs. 420.00", confidence=0.97, box=[[10, 70], [90, 70], [90, 90], [10, 90]], height_px=12.0),
+    ]
+    mock_ocr = OcrResult(
+        lines=mock_lines,
+        engine="mock_engine",
+        mean_confidence=0.96,
+        failure_reason=None,
+        status=STATUS_SUCCESS,
     )
-    db.add(s2)
-    db.commit()
-    db.refresh(s2)
-    p2, r2, sha2 = _make_dummy_image("Tata Salt Vacuum Evaporated 1kg")
-    db.add(ScanImage(scan_id=s2.id, panel="front", file_path=p2, sha256=sha2, width_px=600, height_px=800, byte_size=len(r2), mime_type="image/jpeg"))
-    db.commit()
 
-    # Scan 3: No images (pending evidence)
-    s3 = Scan(
-        inspection_id=insp_id,
-        commodity_generic="Turmeric",
-        brand_name="Everest",
-        panel_shape="rectangular",
-        scale_source="none",
-        rules_as_at=date(2026, 9, 21),
-        catalog_hash="hash_everest",
-        engine_version="2.0.0",
-        rule_pack_version="2026.09.v1",
-        overall_result="not_assessed",
-    )
-    db.add(s3)
-    db.commit()
-    db.refresh(s3)
+    with patch("ocr_engine.run_ocr", return_value=mock_ocr):
+        client.post(f"/scans/{s1.id}/assess")
 
-    # Submit inspection
-    sub_resp = client.post(
-        f"/inspections/{insp_id}/submit",
-        json={"signature_status": "signed", "notes": "Multiple scans in establishment"},
-    )
-    assert sub_resp.status_code == 200
-    data = sub_resp.json()
+        # Scan 2: Unassessed with image (evaluated)
+        s2 = Scan(
+            inspection_id=insp_id,
+            commodity_generic="Salt",
+            brand_name="Tata Salt",
+            panel_shape="rectangular",
+            scale_source="none",
+            rules_as_at=date(2026, 9, 21),
+            catalog_hash="hash_salt",
+            engine_version="2.0.0",
+            rule_pack_version="2026.09.v1",
+            overall_result="not_assessed",
+        )
+        db.add(s2)
+        db.commit()
+        db.refresh(s2)
+        p2, r2, sha2 = _make_dummy_image("Tata Salt Vacuum Evaporated 1kg")
+        db.add(ScanImage(scan_id=s2.id, panel="front", file_path=p2, sha256=sha2, width_px=600, height_px=800, byte_size=len(r2), mime_type="image/jpeg"))
+        db.commit()
 
-    f_sum = data["finalization_summary"]
-    assert s1.id in f_sum["scans_reused"]
-    assert s2.id in f_sum["scans_evaluated"]
-    assert s3.id in f_sum["scans_pending_evidence"]
-    assert f_sum["total_scans"] == 3
+        # Scan 3: No images (pending evidence)
+        s3 = Scan(
+            inspection_id=insp_id,
+            commodity_generic="Turmeric",
+            brand_name="Everest",
+            panel_shape="rectangular",
+            scale_source="none",
+            rules_as_at=date(2026, 9, 21),
+            catalog_hash="hash_everest",
+            engine_version="2.0.0",
+            rule_pack_version="2026.09.v1",
+            overall_result="not_assessed",
+        )
+        db.add(s3)
+        db.commit()
+        db.refresh(s3)
+
+        # Submit inspection
+        sub_resp = client.post(
+            f"/inspections/{insp_id}/submit",
+            json={"signature_status": "signed", "notes": "Multiple scans in establishment"},
+        )
+        assert sub_resp.status_code == 200
+        data = sub_resp.json()
+
+        f_sum = data["finalization_summary"]
+        assert s1.id in f_sum["scans_reused"]
+        assert s2.id in f_sum["scans_evaluated"]
+        assert s3.id in f_sum["scans_pending_evidence"]
+        assert f_sum["total_scans"] == 3
 
 
 def test_merchant_refusal_finalization_with_zero_scans(test_setup):
