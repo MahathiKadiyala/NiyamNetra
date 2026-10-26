@@ -1,7 +1,7 @@
 # Assets Folder
 
 Brand assets for NiyamNetra mobile and web applications:
-- `icon.png` - 1024x1024 main app icon (deep royal-blue/navy gradient rounded-square, white eye emblem, blue/cyan lens with highlight, green magnifying glass, and NiyamNetra wordmark)
+- `icon.png` - 1024x1024 main app icon (white outer border framing the deep royal-blue/navy gradient rounded-square, white eye emblem, blue/cyan lens with highlight, green magnifying glass, and NiyamNetra wordmark)
 - `adaptive-icon.png` - 1024x1024 Android adaptive icon foreground (emblem centered in safe zone circle, transparent background for zero launcher clipping)
 - `splash.png` - 1242x1242 splash screen image (full wordmark version on transparent background)
 - `favicon.png` - 48x48 web favicon
