@@ -4,6 +4,7 @@ import * as Network from 'expo-network';
 import { api } from '../api/client';
 import {
   loadQueue,
+  saveQueue,
   markSynced,
   markFailed,
   purgeSynced,
@@ -13,6 +14,7 @@ import {
   retryFailed,
   invalidateReviewQueue,
 } from './queue';
+import { uploadWithBoundedRetry } from '../api/resilientUpload';
 
 const SyncContext = createContext({
   pending: 0,
@@ -227,8 +229,23 @@ export function SyncProvider({ children }) {
                   }
 
                   for (let i = 0; i < files.length; i++) {
+                    const f = files[i];
+                    if (f.is_uploaded || f.image_id) continue;
                     // eslint-disable-next-line no-await-in-loop
-                    await uploadEvidenceFile(serverScanId, files[i], i);
+                    const uploadRes = await uploadWithBoundedRetry(
+                      () => uploadEvidenceFile(serverScanId, f, i),
+                      { maxRetries: 2, baseDelayMs: 400 }
+                    );
+                    f.is_uploaded = true;
+                    f.image_id = uploadRes?.data?.image_id ?? uploadRes?.data?.id;
+                    try {
+                      const currentQ = await loadQueue();
+                      const qIdx = currentQ.findIndex((x) => x.id === item.id);
+                      if (qIdx >= 0) {
+                        currentQ[qIdx] = item;
+                        await saveQueue(currentQ);
+                      }
+                    } catch {}
                   }
 
                   // Run statutory assessment across all 19 rules
@@ -300,8 +317,23 @@ export function SyncProvider({ children }) {
                 : (item.fileUris || []).map((uri, i) => ({ uri, panel: i === 0 ? 'front' : 'other' }));
               if (serverScanId && files.length > 0) {
                 for (let i = 0; i < files.length; i++) {
+                  const f = files[i];
+                  if (f.is_uploaded || f.image_id) continue;
                   // eslint-disable-next-line no-await-in-loop
-                  await uploadEvidenceFile(serverScanId, files[i], i);
+                  const uploadRes = await uploadWithBoundedRetry(
+                    () => uploadEvidenceFile(serverScanId, f, i),
+                    { maxRetries: 2, baseDelayMs: 400 }
+                  );
+                  f.is_uploaded = true;
+                  f.image_id = uploadRes?.data?.image_id ?? uploadRes?.data?.id;
+                  try {
+                    const currentQ = await loadQueue();
+                    const qIdx = currentQ.findIndex((x) => x.id === item.id);
+                    if (qIdx >= 0) {
+                      currentQ[qIdx] = item;
+                      await saveQueue(currentQ);
+                    }
+                  } catch {}
                 }
                 try {
                   await api.post(`/scans/${serverScanId}/assess`, undefined, { timeout: 60000 });

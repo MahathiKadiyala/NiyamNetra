@@ -27,6 +27,11 @@ import {
   updateScanScope,
   assessScan,
 } from '../../api/inspections';
+import {
+  uploadScanPanelsResiliently,
+  canAssessPackage,
+  isTransientError,
+} from '../../api/resilientUpload';
 import { persistOriginalCapture, createAnalysisImage } from '../../offline/evidenceManager';
 import { assessCaptureQuality } from '../../offline/qualityGate';
 
@@ -122,6 +127,18 @@ export default function InspectionSessionScreen({
   // Completed packages in this visit
   const [packages, setPackages] = useState(inspectionSession?.scans || []);
 
+  const [panelUploadStatus, setPanelUploadStatus] = useState({}); // { front: { status: 'idle'|'uploading'|'uploaded'|'failed', imageId, error, ... } }
+  const [activeServerScanId, setActiveServerScanId] = useState(null);
+  const serverScanIdRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Synchronize packages and clear in-flight package state when session changes
   useEffect(() => {
     setPackages(inspectionSession?.scans || []);
@@ -130,6 +147,9 @@ export default function InspectionSessionScreen({
   useEffect(() => {
     setPanelPhotos({});
     setPanelEvidence({});
+    setPanelUploadStatus({});
+    setActiveServerScanId(null);
+    serverScanIdRef.current = null;
     setCommodity('');
     setBrand('');
     setBatch('');
@@ -228,6 +248,18 @@ export default function InspectionSessionScreen({
           [activePanel]: processedRecord.analysis_uri || processedRecord.original_uri,
         }));
 
+        setPanelUploadStatus((prev) => ({
+          ...prev,
+          [activePanel]: {
+            status: 'idle',
+            imageId: null,
+            sha256: null,
+            error: null,
+            attempts: 0,
+            uri: processedRecord.analysis_uri || processedRecord.original_uri,
+          },
+        }));
+
         // Quality-aware advance:
         // If RETAKE_REQUIRED, keep the inspector on activePanel so they see guidance and retake immediately.
         // If READY or READY_WITH_WARNINGS, advance to the next panel.
@@ -249,7 +281,130 @@ export default function InspectionSessionScreen({
     }
   };
 
-  const handleAssessCurrentPackage = async () => {
+  const handleSaveCurrentPackageOffline = (existingServerScanId = null, currentStatusMap = {}) => {
+    const offlineFindings = buildOfflineFindings({
+      commodity: commodity.trim(),
+      brand: brand.trim(),
+      batch: batch.trim(),
+      hasSticker,
+      isImported,
+      isPerishable,
+    });
+
+    const geometry = {
+      panel_shape: panelShape || 'rectangular',
+      panel_height_mm: null,
+      panel_width_mm: null,
+      panel_diameter_mm: null,
+      total_surface_area_cm2: null,
+      is_blown_moulded: Boolean(isBlownMoulded),
+      scale_source: 'none',
+    };
+
+    const scanItem = {
+      id: `pkg-${existingServerScanId || Date.now()}`,
+      server_id: existingServerScanId || null,
+      commodity_generic: commodity.trim() || null,
+      brand_name: brand.trim() || null,
+      batch_number: batch.trim() || null,
+      geometry,
+      panelPhotos: { ...panelPhotos },
+      panelEvidence: { ...panelEvidence },
+      panelUploadStatus: { ...currentStatusMap },
+      images: [],
+      files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
+        uri: e.original_uri,
+        panel: e.panel,
+        original_uri: e.original_uri,
+        analysis_uri: e.analysis_uri,
+        width: e.width,
+        height: e.height,
+        file_size_bytes: e.file_size_bytes,
+        captured_at: e.captured_at,
+        capture_source: e.capture_source,
+        image_id: currentStatusMap[e.panel]?.imageId || null,
+        is_uploaded: currentStatusMap[e.panel]?.status === 'uploaded',
+      })),
+      is_imported: isImported,
+      is_perishable: isPerishable,
+      has_sticker: hasSticker,
+      overall_result: 'not_assessed',
+      checks_assessed: 0,
+      checks_total: 19,
+      findings: offlineFindings,
+      is_offline: true,
+      created_at: new Date().toISOString(),
+    };
+
+    const updated = [...packages, scanItem];
+    setPackages(updated);
+
+    // Reset current package inputs for next item
+    setPanelPhotos({});
+    setPanelEvidence({});
+    setPanelUploadStatus({});
+    setActiveServerScanId(null);
+    serverScanIdRef.current = null;
+    setCommodity('');
+    setBrand('');
+    setBatch('');
+    setHasSticker(false);
+    setIsImported(false);
+    setIsPerishable(false);
+    setIsBlownMoulded(false);
+    setActivePanel('front');
+
+    Alert.alert(
+      'Package Saved to Offline Queue',
+      'This package and all captured panel evidence have been safely stored locally. You can finalize the visit and sync when connectivity returns, or re-run assessment from the package list.',
+      [{ text: 'Review Package' }]
+    );
+
+    if (onPackageAssessed) {
+      onPackageAssessed(scanItem, updated);
+    }
+  };
+
+  const handleRetrySinglePanel = async (panelKey) => {
+    if (assessingRef.current) return;
+    const ev = panelEvidence[panelKey];
+    const uri = ev?.analysis_uri || ev?.original_uri || panelPhotos[panelKey];
+    if (!uri) return;
+
+    let serverScanId = serverScanIdRef.current || activeServerScanId;
+    if (!serverScanId) {
+      return handleAssessCurrentPackage();
+    }
+
+    assessingRef.current = true;
+    setAssessing(true);
+    try {
+      const outcome = await uploadScanPanelsResiliently({
+        serverScanId,
+        panels: [{ panelKey, uri, evidence: ev }],
+        currentStatus: panelUploadStatus,
+        uploadFn: uploadScanImage,
+        maxRetries: 2,
+        baseDelayMs: 400,
+        onPanelStatusChange: (k, st) => {
+          if (isMountedRef.current) {
+            setPanelUploadStatus((prev) => ({ ...prev, [k]: st }));
+          }
+        },
+        isCancelled: () => !isMountedRef.current,
+      });
+      if (isMountedRef.current) {
+        setPanelUploadStatus(outcome.statusMap);
+      }
+    } catch (e) {
+      console.warn('[Session] retry single panel error:', e);
+    } finally {
+      assessingRef.current = false;
+      if (isMountedRef.current) setAssessing(false);
+    }
+  };
+
+  const handleAssessCurrentPackage = async (onlyRetryFailed = false) => {
     if (assessingRef.current) return;
     const photoUris = Object.values(panelPhotos).filter(Boolean);
     if (photoUris.length === 0) {
@@ -271,9 +426,8 @@ export default function InspectionSessionScreen({
     assessingRef.current = true;
     setAssessing(true);
     let serverErrorDetail = null;
+
     try {
-      let serverScanId = null;
-      let assessedScan = null;
       let usedServerId = inspectionSession?.serverInspectionId;
 
       // 1. If online and no serverInspectionId yet, create inspection on the server
@@ -281,7 +435,6 @@ export default function InspectionSessionScreen({
         try {
           let storeId = inspectionSession?.store?.id;
           if (!storeId || (typeof storeId === 'number' && storeId < 0)) {
-            // Local store intake — create store on server first
             const createdStore = await createStore({
               name: inspectionSession?.store?.name || 'Local Retail Store',
               store_type: inspectionSession?.store?.store_type || 'Kirana / General Store',
@@ -321,10 +474,6 @@ export default function InspectionSessionScreen({
         }
       }
 
-      // 2. Honest Geometry: No fabricated dimensions (C14 / Legal Metrology Act)
-      // When no calibrated physical reference (ID-1 card / ₹5 coin) or verified declared
-      // dimension is provided, scale_source must be 'none'. Downstream statutory typography
-      // checks will honestly report 'not_assessed' rather than manufactured facts.
       const geometry = {
         panel_shape: panelShape || 'rectangular',
         panel_height_mm: null,
@@ -335,8 +484,15 @@ export default function InspectionSessionScreen({
         scale_source: 'none',
       };
 
-      // 3. Try server createScan -> scope -> upload images -> assessScan
-      if (usedServerId) {
+      // If no server inspection ID available, we are offline
+      if (!usedServerId) {
+        handleSaveCurrentPackageOffline(null, panelUploadStatus);
+        return;
+      }
+
+      // 2. Create scan on server if not already created for this package
+      let serverScanId = serverScanIdRef.current || activeServerScanId;
+      if (!serverScanId) {
         try {
           const tScanStart = Date.now();
           const scanRes = await createScan(usedServerId, {
@@ -347,146 +503,152 @@ export default function InspectionSessionScreen({
           });
           bench.scanCreationMs = Date.now() - tScanStart;
           serverScanId = scanRes?.id || scanRes?.scan_id;
-
           if (serverScanId) {
-            // Persist declared scope flags
+            serverScanIdRef.current = serverScanId;
+            if (isMountedRef.current) setActiveServerScanId(serverScanId);
             await updateScanScope(serverScanId, {
               is_imported: isImported,
               is_perishable: isPerishable,
               has_sticker: hasSticker,
             });
-
-            // Upload all captured panel images concurrently in parallel for max speed
-            const tUploadsStart = Date.now();
-            const uploadTasks = Object.entries(panelEvidence)
-              .filter(([_, ev]) => Boolean(ev?.analysis_uri || ev?.original_uri))
-              .map(async ([panelKey, ev]) => {
-                const tPStart = Date.now();
-                const uploadUri = ev.analysis_uri || ev.original_uri;
-                const res = await uploadScanImage(serverScanId, panelKey, uploadUri);
-                const tPEnd = Date.now();
-                bench.panelUploads[panelKey] = tPEnd - tPStart;
-                return res;
-              });
-            await Promise.all(uploadTasks);
-            bench.totalUploadMs = Date.now() - tUploadsStart;
-
-            // Run authoritative statutory assessment across all 19 rules
-            const tAssessStart = Date.now();
-            assessedScan = await assessScan(serverScanId);
-            bench.serverAssessMs = Date.now() - tAssessStart;
           }
-        } catch (serverErr) {
-          // Distinguish "server reachable but failed" from "device offline /
-          // timeout" so the inspector sees the honest reason, not a vague
-          // "offline" for what was a 500, or vice versa.
-          const resp = serverErr?.response;
-          if (resp) {
-            serverErrorDetail = `Server error (HTTP ${resp.status})${resp?.data?.detail ? ': ' + resp.data.detail : ''}`;
-          } else if (serverErr?.request || serverErr?.code === 'ECONNABORTED' || /timeout|network/i.test(serverErr?.message || '')) {
-            serverErrorDetail = 'Device offline or the server took too long to respond.';
-          } else {
-            serverErrorDetail = serverErr?.message || 'Server assessment request failed';
-          }
-          console.warn('[Session] Live server assessment failed, falling back to local:', serverErrorDetail);
+        } catch (scanErr) {
+          serverErrorDetail = scanErr?.response?.data?.detail || scanErr?.message || 'Failed to create scan on server';
+          console.warn('[Session] createScan failed:', serverErrorDetail);
+          Alert.alert('Scan Creation Failed', `${serverErrorDetail}. You can retry or save this package to the offline queue.`, [
+            { text: 'Retry', onPress: () => handleAssessCurrentPackage() },
+            { text: 'Save Offline', onPress: () => handleSaveCurrentPackageOffline(null, panelUploadStatus) },
+            { text: 'Cancel', style: 'cancel' },
+          ]);
+          return;
         }
-      } else if (!serverErrorDetail) {
-        serverErrorDetail = 'No active server connection (offline mode)';
+      }
+
+      // 3. Resilient, per-panel bounded upload
+      const panelsToUpload = Object.entries(panelEvidence)
+        .filter(([_, ev]) => Boolean(ev?.analysis_uri || ev?.original_uri))
+        .map(([panelKey, ev]) => ({
+          panelKey,
+          uri: ev.analysis_uri || ev.original_uri,
+          evidence: ev,
+        }));
+
+      const tUploadsStart = Date.now();
+      const uploadOutcome = await uploadScanPanelsResiliently({
+        serverScanId,
+        panels: panelsToUpload,
+        currentStatus: panelUploadStatus,
+        uploadFn: uploadScanImage,
+        maxRetries: 2,
+        baseDelayMs: 400,
+        onPanelStatusChange: (pKey, statusObj) => {
+          if (isMountedRef.current) {
+            setPanelUploadStatus((prev) => ({ ...prev, [pKey]: statusObj }));
+          }
+        },
+        isCancelled: () => !isMountedRef.current,
+      });
+      bench.totalUploadMs = Date.now() - tUploadsStart;
+
+      if (isMountedRef.current) {
+        setPanelUploadStatus(uploadOutcome.statusMap);
+      }
+
+      // 4. Assessment Gating: verify all captured panels are uploaded
+      const gate = canAssessPackage(
+        panelsToUpload.map((p) => p.panelKey),
+        uploadOutcome.statusMap
+      );
+
+      if (!gate.canAssess) {
+        // Some panels failed! Do not assess yet. Keep the package intact.
+        const failedCount = uploadOutcome.failedCount;
+        const failedNames = uploadOutcome.failedPanels
+          .map((k) => PANELS.find((p) => p.key === k)?.label || k)
+          .join(', ');
+
+        Alert.alert(
+          'Evidence Upload Incomplete',
+          `${failedCount} panel(s) could not be uploaded (${failedNames}):\n• ${uploadOutcome.firstError || 'Network timeout or connection error'}\n\nSuccessful panels are safely stored on the server. Please tap "Retry Failed Uploads" to resume.`,
+          [
+            { text: 'Retry Failed', onPress: () => handleAssessCurrentPackage(true) },
+            {
+              text: 'Save Offline',
+              style: 'destructive',
+              onPress: () => handleSaveCurrentPackageOffline(serverScanId, uploadOutcome.statusMap),
+            },
+            { text: 'Review', style: 'cancel' },
+          ]
+        );
+        return;
+      }
+
+      // 5. All panels uploaded! Trigger authoritative statutory assessment
+      const tAssessStart = Date.now();
+      let assessedScan = null;
+      try {
+        assessedScan = await assessScan(serverScanId);
+        bench.serverAssessMs = Date.now() - tAssessStart;
+      } catch (assessErr) {
+        serverErrorDetail = assessErr?.response?.data?.detail || assessErr?.message || 'Server assessment request failed';
+        console.warn('[Session] assessScan failed:', serverErrorDetail);
+        Alert.alert(
+          'Assessment Request Delayed',
+          `All ${panelsToUpload.length} panel photos were uploaded successfully, but the server assessment did not complete:\n• ${serverErrorDetail}\n\nYour evidence is safely stored on the server. You can tap "Run Assessment" again without re-uploading photos.`,
+          [
+            { text: 'Run Assessment Again', onPress: () => handleAssessCurrentPackage() },
+            { text: 'Save Offline', onPress: () => handleSaveCurrentPackageOffline(serverScanId, uploadOutcome.statusMap) },
+            { text: 'Review Package', style: 'cancel' },
+          ]
+        );
+        return;
       }
 
       bench.totalInspectorWaitMs = Date.now() - tFlowStart;
       console.log('[PERF_BASELINE] package_assessment_flow', JSON.stringify(bench));
 
-      let scanItem;
-      if (assessedScan && Array.isArray(assessedScan.findings)) {
-        // Authoritative server assessment result
-        scanItem = {
-          id: `pkg-${serverScanId || Date.now()}`,
-          server_id: serverScanId,
-          commodity_generic: assessedScan.commodity_generic || (commodity.trim() ? commodity.trim() : null),
-          brand_name: assessedScan.brand_name || (brand.trim() ? brand.trim() : null),
-          batch_number: assessedScan.batch_number || (batch.trim() ? batch.trim() : null),
-          geometry,
-          panelPhotos: { ...panelPhotos },
-          panelEvidence: { ...panelEvidence },
-          images: assessedScan.images || [],
-          files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
-            uri: e.original_uri,
-            panel: e.panel,
-            original_uri: e.original_uri,
-            analysis_uri: e.analysis_uri,
-            width: e.width,
-            height: e.height,
-            file_size_bytes: e.file_size_bytes,
-            captured_at: e.captured_at,
-            capture_source: e.capture_source,
-          })),
-          is_imported: isImported,
-          is_perishable: isPerishable,
-          has_sticker: hasSticker,
-          status: assessedScan.status || 'assessed',
-          overall_result: assessedScan.overall_result,
-          violation_limb: assessedScan.violation_limb,
-          checks_assessed: assessedScan.checks_assessed,
-          checks_total: assessedScan.checks_total || (Array.isArray(assessedScan.findings) ? assessedScan.findings.length : 19),
-          findings: assessedScan.findings,
-          counts: assessedScan.counts,
-          diagnostics: assessedScan.diagnostics,
-          rule_pack_version: assessedScan.rule_pack_version,
-          mrp: assessedScan.mrp,
-          net_quantity_value: assessedScan.net_quantity_value,
-          net_quantity_unit: assessedScan.net_quantity_unit,
-          created_at: assessedScan.created_at || new Date().toISOString(),
-        };
-      } else {
-        // Offline assessment fallback — never invent a false compliant verdict
-        const offlineFindings = buildOfflineFindings({
-          commodity: commodity.trim(),
-          brand: brand.trim(),
-          batch: batch.trim(),
-          hasSticker,
-          isImported,
-          isPerishable,
-        });
-        scanItem = {
-          id: `pkg-${serverScanId || Date.now()}`,
-          server_id: serverScanId,
-          commodity_generic: commodity.trim() || null,
-          brand_name: brand.trim() || null,
-          batch_number: batch.trim() || null,
-          geometry,
-          panelPhotos: { ...panelPhotos },
-          panelEvidence: { ...panelEvidence },
-          images: [],
-          files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
-            uri: e.original_uri,
-            panel: e.panel,
-            original_uri: e.original_uri,
-            analysis_uri: e.analysis_uri,
-            width: e.width,
-            height: e.height,
-            file_size_bytes: e.file_size_bytes,
-            captured_at: e.captured_at,
-            capture_source: e.capture_source,
-          })),
-          is_imported: isImported,
-          is_perishable: isPerishable,
-          has_sticker: hasSticker,
-          overall_result: 'not_assessed',
-          checks_assessed: 0,
-          checks_total: 19,
-          findings: offlineFindings,
-          is_offline: true,
-          created_at: new Date().toISOString(),
-        };
-
-        // Alert the inspector with the reason why live evaluation couldn't complete
-        Alert.alert(
-          'Assessment Pending — Not Scored Yet',
-          `The statutory checks could not be assessed live right now:\n• ${serverErrorDetail}\n\nYour photos and package details are saved. Nothing has been scored, so no verdict is invented. Once you are online, open this package and tap "Run Server Assessment" — the engine will read YOUR actual photos and produce a genuine result.`,
-          [{ text: 'Review Package' }]
-        );
-      }
+      // Construct scanItem with authoritative assessedScan
+      const scanItem = {
+        id: `pkg-${serverScanId || Date.now()}`,
+        server_id: serverScanId,
+        commodity_generic: assessedScan?.commodity_generic || (commodity.trim() ? commodity.trim() : null),
+        brand_name: assessedScan?.brand_name || (brand.trim() ? brand.trim() : null),
+        batch_number: assessedScan?.batch_number || (batch.trim() ? batch.trim() : null),
+        geometry,
+        panelPhotos: { ...panelPhotos },
+        panelEvidence: { ...panelEvidence },
+        panelUploadStatus: { ...uploadOutcome.statusMap },
+        images: assessedScan.images || [],
+        files: Object.values(panelEvidence).filter(Boolean).map((e) => ({
+          uri: e.original_uri,
+          panel: e.panel,
+          original_uri: e.original_uri,
+          analysis_uri: e.analysis_uri,
+          width: e.width,
+          height: e.height,
+          file_size_bytes: e.file_size_bytes,
+          captured_at: e.captured_at,
+          capture_source: e.capture_source,
+          image_id: uploadOutcome.statusMap[e.panel]?.imageId || null,
+          is_uploaded: true,
+        })),
+        is_imported: isImported,
+        is_perishable: isPerishable,
+        has_sticker: hasSticker,
+        status: assessedScan?.status || 'assessed',
+        overall_result: assessedScan?.overall_result,
+        violation_limb: assessedScan?.violation_limb,
+        checks_assessed: assessedScan?.checks_assessed,
+        checks_total: assessedScan?.checks_total || (Array.isArray(assessedScan?.findings) ? assessedScan.findings.length : 19),
+        findings: assessedScan?.findings,
+        counts: assessedScan?.counts,
+        diagnostics: assessedScan?.diagnostics,
+        rule_pack_version: assessedScan?.rule_pack_version,
+        mrp: assessedScan?.mrp,
+        net_quantity_value: assessedScan?.net_quantity_value,
+        net_quantity_unit: assessedScan?.net_quantity_unit,
+        created_at: assessedScan?.created_at || new Date().toISOString(),
+      };
 
       const updated = [...packages, scanItem];
       setPackages(updated);
@@ -494,6 +656,9 @@ export default function InspectionSessionScreen({
       // Reset current package inputs for next item
       setPanelPhotos({});
       setPanelEvidence({});
+      setPanelUploadStatus({});
+      setActiveServerScanId(null);
+      serverScanIdRef.current = null;
       setCommodity('');
       setBrand('');
       setBatch('');
@@ -503,15 +668,15 @@ export default function InspectionSessionScreen({
       setIsBlownMoulded(false);
       setActivePanel('front');
 
-      // Navigate to findings review for this package
       if (onPackageAssessed) {
         onPackageAssessed(scanItem, updated);
       }
     } catch (e) {
-      Alert.alert('Assessment Error', `Failed to assess package: ${e?.message || 'Unknown error'}. Saved to offline queue.`);
+      console.error('[Session] Package assessment error:', e);
+      Alert.alert('Assessment Error', `Failed to assess package: ${e?.message || 'Unknown error'}.`);
     } finally {
       assessingRef.current = false;
-      setAssessing(false);
+      if (isMountedRef.current) setAssessing(false);
     }
   };
 
@@ -661,6 +826,17 @@ export default function InspectionSessionScreen({
           {PANELS.map((p) => {
             const hasPhoto = !!panelPhotos[p.key];
             const isAct = activePanel === p.key;
+            const uploadSt = panelUploadStatus[p.key]?.status || panelUploadStatus[p.key]?.state;
+            const isUploaded = uploadSt === 'uploaded';
+            const isFailed = uploadSt === 'failed';
+            const isUploading = uploadSt === 'uploading';
+
+            let icon = '';
+            if (isUploaded) icon = '✓ ';
+            else if (isUploading) icon = '⏳ ';
+            else if (isFailed) icon = '⚠️ ';
+            else if (hasPhoto) icon = '● ';
+
             return (
               <Pressable
                 key={p.key}
@@ -669,16 +845,23 @@ export default function InspectionSessionScreen({
                   styles.panelChip,
                   isAct && styles.panelChipActive,
                   hasPhoto && styles.panelChipDone,
+                  isUploaded && styles.panelChipUploaded,
+                  isFailed && styles.panelChipFailed,
                 ]}
+                accessibilityRole="button"
+                accessibilityLabel={`${p.label} panel, ${isUploaded ? 'uploaded' : isFailed ? 'upload failed' : hasPhoto ? 'photo ready' : 'no photo'}`}
               >
                 <Text
                   style={[
                     styles.panelChipText,
                     isAct && styles.panelChipTextActive,
                     hasPhoto && styles.panelChipTextDone,
+                    isUploaded && styles.panelChipTextUploaded,
+                    isFailed && styles.panelChipTextFailed,
                   ]}
+                  numberOfLines={1}
                 >
-                  {hasPhoto ? '✓ ' : ''}{p.label}
+                  {icon}{p.label}
                 </Text>
               </Pressable>
             );
@@ -704,6 +887,21 @@ export default function InspectionSessionScreen({
               <View style={styles.previewOverlay}>
                 <View style={{ flex: 1, marginRight: spacing.sm }}>
                   <Text style={styles.previewLabel}>{PANELS.find((p) => p.key === activePanel)?.label} Captured</Text>
+                  {panelUploadStatus[activePanel]?.status === 'uploaded' && (
+                    <Text style={styles.uploadStatusSuccessText}>
+                      ✓ Uploaded to Server {panelUploadStatus[activePanel].imageId ? `(#${panelUploadStatus[activePanel].imageId})` : ''}
+                    </Text>
+                  )}
+                  {panelUploadStatus[activePanel]?.status === 'failed' && (
+                    <Text style={styles.uploadStatusFailedText}>
+                      ⚠️ Upload failed: {panelUploadStatus[activePanel].error || 'Network error'}
+                    </Text>
+                  )}
+                  {panelUploadStatus[activePanel]?.status === 'uploading' && (
+                    <Text style={styles.uploadStatusUploadingText}>
+                      ⏳ Uploading to server…
+                    </Text>
+                  )}
                   {panelEvidence[activePanel]?.quality_gate && (
                     <View style={[
                       styles.qualityBadge,
@@ -726,25 +924,43 @@ export default function InspectionSessionScreen({
                     </View>
                   )}
                 </View>
-                <Pressable
-                  onPress={() => {
-                    setPanelPhotos((prev) => ({ ...prev, [activePanel]: null }));
-                    setPanelEvidence((prev) => ({ ...prev, [activePanel]: null }));
-                  }}
-                  style={[
-                    styles.retakeBtn,
-                    panelEvidence[activePanel]?.quality_gate?.decision === 'RETAKE_REQUIRED' && styles.retakeBtnUrgent,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Retake photo"
-                >
-                  <Text style={[
-                    styles.retakeText,
-                    panelEvidence[activePanel]?.quality_gate?.decision === 'RETAKE_REQUIRED' && styles.retakeTextUrgent,
-                  ]}>
-                    Retake Photo
-                  </Text>
-                </Pressable>
+                <View style={{ alignItems: 'flex-end', gap: 6 }}>
+                  {panelUploadStatus[activePanel]?.status === 'failed' && (
+                    <Pressable
+                      onPress={() => handleRetrySinglePanel(activePanel)}
+                      disabled={assessing}
+                      style={styles.retrySingleBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry uploading this panel"
+                    >
+                      <Text style={styles.retrySingleBtnText}>Retry Upload</Text>
+                    </Pressable>
+                  )}
+                  <Pressable
+                    onPress={() => {
+                      setPanelPhotos((prev) => ({ ...prev, [activePanel]: null }));
+                      setPanelEvidence((prev) => ({ ...prev, [activePanel]: null }));
+                      setPanelUploadStatus((prev) => {
+                        const next = { ...prev };
+                        delete next[activePanel];
+                        return next;
+                      });
+                    }}
+                    style={[
+                      styles.retakeBtn,
+                      panelEvidence[activePanel]?.quality_gate?.decision === 'RETAKE_REQUIRED' && styles.retakeBtnUrgent,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retake photo"
+                  >
+                    <Text style={[
+                      styles.retakeText,
+                      panelEvidence[activePanel]?.quality_gate?.decision === 'RETAKE_REQUIRED' && styles.retakeTextUrgent,
+                    ]}>
+                      Retake Photo
+                    </Text>
+                  </Pressable>
+                </View>
               </View>
             </View>
           ) : (
@@ -874,36 +1090,96 @@ export default function InspectionSessionScreen({
         </Card>
 
         {/* Package Action Buttons */}
-        <View style={{ gap: spacing.sm, marginBottom: spacing.xl }}>
-          <PrimaryButton
-            title={assessing ? 'Evaluating Statutory Checks…' : 'Assess Package (Statutory Rule Checks) →'}
-            onPress={handleAssessCurrentPackage}
-            disabled={assessing || capturedCount === 0}
-            accessibilityLabel="Run Legal Metrology statutory checks"
-          />
+        {(() => {
+          const capturedKeys = Object.keys(panelPhotos).filter((k) => !!panelPhotos[k]);
+          const failedKeys = capturedKeys.filter(
+            (k) => panelUploadStatus[k]?.status === 'failed' || panelUploadStatus[k]?.state === 'failed'
+          );
+          const uploadedKeys = capturedKeys.filter(
+            (k) => (panelUploadStatus[k]?.status === 'uploaded' || panelUploadStatus[k]?.state === 'uploaded') && panelUploadStatus[k]?.imageId
+          );
+          const allUploaded = capturedKeys.length > 0 && uploadedKeys.length === capturedKeys.length;
+          const hasFailures = failedKeys.length > 0;
 
-          <Pressable
-            onPress={handleFinishInspection}
-            style={styles.finishBtn}
-            accessibilityRole="button"
-            accessibilityLabel="Finish visit and submit all packages"
-          >
-            <Text style={styles.finishBtnText}>
-              ✓ Conclude Inspection Visit ({packages.length} Packages Ready) →
-            </Text>
-          </Pressable>
+          return (
+            <View style={{ gap: spacing.sm, marginBottom: spacing.xl }}>
+              {hasFailures && (
+                <View style={styles.uploadAlertBox}>
+                  <Text style={styles.uploadAlertTitle}>
+                    ⚠️ {failedKeys.length} Evidence Panel(s) Pending Upload
+                  </Text>
+                  <Text style={styles.uploadAlertBody}>
+                    Transient network error prevented complete upload. Already-uploaded panels ({uploadedKeys.length}) are safely preserved on the server.
+                  </Text>
+                </View>
+              )}
 
-          <Pressable
-            onPress={handleRecordRefusal}
-            style={styles.refusalBtn}
-            accessibilityRole="button"
-            accessibilityLabel="Record merchant refusal"
-          >
-            <Text style={styles.refusalBtnText}>
-              🚫 Record Merchant Refusal / Non-Cooperation
-            </Text>
-          </Pressable>
-        </View>
+              {allUploaded && (
+                <View style={styles.uploadSuccessBox}>
+                  <Text style={styles.uploadSuccessText}>
+                    ✓ All {uploadedKeys.length} panel photos uploaded and verified on server. Ready for statutory assessment.
+                  </Text>
+                </View>
+              )}
+
+              {hasFailures ? (
+                <>
+                  <PrimaryButton
+                    title={assessing ? 'Retrying Uploads…' : `Retry Failed Uploads (${failedKeys.length}) →`}
+                    onPress={() => handleAssessCurrentPackage(true)}
+                    disabled={assessing}
+                    accessibilityLabel="Retry failed evidence uploads"
+                  />
+                  <Pressable
+                    onPress={() => handleSaveCurrentPackageOffline(serverScanIdRef.current || activeServerScanId, panelUploadStatus)}
+                    style={styles.saveOfflineBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Save package to offline queue"
+                  >
+                    <Text style={styles.saveOfflineBtnText}>
+                      💾 Save Package to Offline Queue (Sync Later)
+                    </Text>
+                  </Pressable>
+                </>
+              ) : (
+                <PrimaryButton
+                  title={
+                    assessing
+                      ? 'Evaluating Statutory Checks…'
+                      : allUploaded
+                      ? 'Run Statutory Assessment (All Panels Ready) →'
+                      : 'Assess Package (Statutory Rule Checks) →'
+                  }
+                  onPress={() => handleAssessCurrentPackage(false)}
+                  disabled={assessing || capturedCount === 0}
+                  accessibilityLabel="Run Legal Metrology statutory checks"
+                />
+              )}
+
+              <Pressable
+                onPress={handleFinishInspection}
+                style={styles.finishBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Finish visit and submit all packages"
+              >
+                <Text style={styles.finishBtnText}>
+                  ✓ Conclude Inspection Visit ({packages.length} Packages Ready) →
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={handleRecordRefusal}
+                style={styles.refusalBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Record merchant refusal"
+              >
+                <Text style={styles.refusalBtnText}>
+                  🚫 Record Merchant Refusal / Non-Cooperation
+                </Text>
+              </Pressable>
+            </View>
+          );
+        })()}
       </ScrollView>
     </View>
   );
@@ -998,6 +1274,14 @@ const styles = StyleSheet.create({
     borderColor: colors.pass.border,
     backgroundColor: colors.pass.fill,
   },
+  panelChipUploaded: {
+    borderColor: colors.pass.border,
+    backgroundColor: '#F0FDF4',
+  },
+  panelChipFailed: {
+    borderColor: colors.violation.border,
+    backgroundColor: '#FEF2F2',
+  },
   panelChipText: {
     fontSize: 10,
     fontWeight: '600',
@@ -1009,6 +1293,14 @@ const styles = StyleSheet.create({
   },
   panelChipTextDone: {
     color: colors.pass.text,
+    fontWeight: '700',
+  },
+  panelChipTextUploaded: {
+    color: colors.pass.text,
+    fontWeight: '700',
+  },
+  panelChipTextFailed: {
+    color: colors.violation.text,
     fontWeight: '700',
   },
   cameraCard: {
@@ -1134,6 +1426,37 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
+  uploadStatusSuccessText: {
+    fontSize: 10.5,
+    fontWeight: '600',
+    color: '#4ade80',
+    marginTop: 2,
+  },
+  uploadStatusFailedText: {
+    fontSize: 10.5,
+    fontWeight: '600',
+    color: '#f87171',
+    marginTop: 2,
+  },
+  uploadStatusUploadingText: {
+    fontSize: 10.5,
+    fontWeight: '600',
+    color: '#67e8f9',
+    marginTop: 2,
+  },
+  retrySingleBtn: {
+    backgroundColor: '#dc2626',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: '#fca5a5',
+  },
+  retrySingleBtnText: {
+    color: colors.white,
+    fontSize: 10.5,
+    fontWeight: '700',
+  },
   retakeBtn: {
     backgroundColor: colors.surface,
     paddingHorizontal: 10,
@@ -1246,6 +1569,51 @@ const styles = StyleSheet.create({
   flagTextAlert: {
     color: colors.violation.text,
     fontWeight: '700',
+  },
+  uploadAlertBox: {
+    backgroundColor: '#FEF2F2',
+    borderColor: colors.violation.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: spacing.sm,
+  },
+  uploadAlertTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.violation.text,
+    marginBottom: 2,
+  },
+  uploadAlertBody: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+  },
+  uploadSuccessBox: {
+    backgroundColor: '#F0FDF4',
+    borderColor: colors.pass.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: spacing.sm,
+  },
+  uploadSuccessText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.pass.text,
+    lineHeight: 15,
+  },
+  saveOfflineBtn: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveOfflineBtnText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
   },
   finishBtn: {
     backgroundColor: colors.surface,
