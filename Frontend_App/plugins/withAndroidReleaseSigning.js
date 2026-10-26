@@ -19,9 +19,8 @@
 //    "Signer #1 certificate DN: CN=Android Debug".)
 //    Fix: sign local release builds with the same keystore by pointing the four
 //    NN_RELEASE_* variables below at it (`eas credentials` can download the EAS
-//    keystore). Without them the build still works, but it is debug signed and
-//    cannot install over an EAS build — which is why this plugin prints that
-//    warning into every prebuild log.
+//    keystore). Without them, the release build remains unsigned (or signed by
+//    EAS in cloud builds) and will NEVER silently fall back to the debug keystore.
 //
 // 2. SIGNATURE SCHEMES (checked, not fixable here).
 //    With minSdkVersion >= 24 the Android Gradle plugin (8.11) ships the APK
@@ -53,10 +52,10 @@ const BLOCK = `
 // ${MARKER} — begin
 // Managed by plugins/withAndroidReleaseSigning.js. Keep the marker: it is what
 // makes the plugin idempotent.
-def nnKeystorePath = System.getenv("NN_RELEASE_KEYSTORE")
-def nnKeystorePassword = System.getenv("NN_RELEASE_KEYSTORE_PASSWORD")
-def nnKeyAlias = System.getenv("NN_RELEASE_KEY_ALIAS")
-def nnKeyPassword = System.getenv("NN_RELEASE_KEY_PASSWORD")
+def nnKeystorePath = System.getenv("NN_RELEASE_KEYSTORE") ?: (project.findProperty("NN_RELEASE_KEYSTORE") ?: null)
+def nnKeystorePassword = System.getenv("NN_RELEASE_KEYSTORE_PASSWORD") ?: (project.findProperty("NN_RELEASE_KEYSTORE_PASSWORD") ?: null)
+def nnKeyAlias = System.getenv("NN_RELEASE_KEY_ALIAS") ?: (project.findProperty("NN_RELEASE_KEY_ALIAS") ?: null)
+def nnKeyPassword = System.getenv("NN_RELEASE_KEY_PASSWORD") ?: (project.findProperty("NN_RELEASE_KEY_PASSWORD") ?: null)
 def nnKeystoreFile = (nnKeystorePath && nnKeystorePassword && nnKeyAlias && nnKeyPassword) ? file(nnKeystorePath) : null
 if (nnKeystoreFile != null && !nnKeystoreFile.exists()) {
     throw new GradleException("NN_RELEASE_KEYSTORE points at " + nnKeystoreFile + " but that file does not exist")
@@ -77,15 +76,19 @@ android {
     }
     buildTypes {
         release {
-            if (nnKeystoreFile != null) signingConfig signingConfigs.release
+            if (nnKeystoreFile != null) {
+                signingConfig signingConfigs.release
+            } else {
+                // Ensure local release builds never fall back to debug signing.
+                signingConfig null
+            }
         }
     }
 }
 if (nnKeystoreFile == null) {
-    logger.lifecycle("[NiyamNetra] No NN_RELEASE_KEYSTORE* env vars: this release APK is signed with the DEBUG keystore. " +
-        "It installs on a phone that has no NiyamNetra yet, but Android refuses it with 'App not installed' on any phone that " +
-        "already carries a differently signed build. Uninstall com.niyamnetra.app there first, or sign with the EAS keystore: " +
-        "eas credentials (Android) -> download, then set NN_RELEASE_KEYSTORE / _KEYSTORE_PASSWORD / _KEY_ALIAS / _KEY_PASSWORD.")
+    logger.lifecycle("[NiyamNetra] No NN_RELEASE_KEYSTORE* credentials configured: local release builds will remain unsigned. " +
+        "Release builds will NEVER fall back to the Android debug keystore. To sign local release APKs, set " +
+        "NN_RELEASE_KEYSTORE / _KEYSTORE_PASSWORD / _KEY_ALIAS / _KEY_PASSWORD. For cloud builds, EAS supplies managed credentials.")
 }
 // ${MARKER} — end
 `;
@@ -98,11 +101,21 @@ if (nnKeystoreFile == null) {
  * @returns {{contents: string, patched: boolean, reason?: string}}
  */
 function patchAppGradle(contents) {
-  if (contents.includes(MARKER)) return { contents, patched: false, reason: 'already patched' };
-  if (!contents.includes('dependencies {')) {
-    return { contents, patched: false, reason: 'dependencies block not found (unexpected app/build.gradle)' };
+  let modified = contents;
+  // If release buildType has signingConfigs.debug, eliminate it to prevent insecure fallback
+  if (/release\s*\{[\s\S]*?signingConfig signingConfigs\.debug/.test(modified)) {
+    modified = modified.replace(
+      /(release\s*\{[\s\S]*?)signingConfig signingConfigs\.debug/,
+      '$1signingConfig null'
+    );
   }
-  return { contents: `${contents.trimEnd()}\n${BLOCK}`, patched: true };
+  if (modified.includes(MARKER)) {
+    return { contents: modified, patched: modified !== contents, reason: 'already patched' };
+  }
+  if (!modified.includes('dependencies {')) {
+    return { contents: modified, patched: false, reason: 'dependencies block not found (unexpected app/build.gradle)' };
+  }
+  return { contents: `${modified.trimEnd()}\n${BLOCK}`, patched: true };
 }
 
 module.exports = function withAndroidReleaseSigning(config) {

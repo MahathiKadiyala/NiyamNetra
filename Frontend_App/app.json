@@ -39,11 +39,11 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT",
-        "android.permission.CAMERA",
+        "USE_FINGERPRINT"
+      ],
+      "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.SYSTEM_ALERT_WINDOW"
       ]
     },
     "plugins": [
@@ -63,7 +63,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow NiyamNetra to access your camera to capture package photos for assessment."
+          "cameraPermission": "Allow NiyamNetra to access your camera to capture package photos for assessment.",
+          "microphonePermission": false
         }
       ],
       [
