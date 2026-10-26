@@ -716,15 +716,36 @@ def test_performance_and_memory_within_render_budget():
     workload rather than cumulative memory from preceding full-suite test allocations.
     """
     import json
+    import os
+    from pathlib import Path
     import subprocess
     import sys
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    child_env = os.environ.copy()
+    existing_pp = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = (
+        f"{backend_dir}{os.pathsep}{existing_pp}" if existing_pp else str(backend_dir)
+    )
 
     cmd = [
         sys.executable,
         "-c",
         "import json; from rules.benchmark import benchmark_phase4_end_to_end; print(json.dumps(benchmark_phase4_end_to_end(iterations=20)))",
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(
+        cmd,
+        cwd=backend_dir,
+        env=child_env,
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        raise AssertionError(
+            f"Benchmark subprocess failed with code {res.returncode}.\n"
+            f"STDOUT:\n{res.stdout}\n"
+            f"STDERR:\n{res.stderr}"
+        )
     bench = json.loads(res.stdout)
 
     assert bench["render_compliant"] is True

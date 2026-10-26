@@ -1,11 +1,18 @@
 """conftest.py"""
 import os
+import sys
+from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 os.environ.setdefault("ENV", "test")
 os.environ.setdefault("JWT_SECRET", "test-secret-" + "0" * 40)   # passes the validator
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 
 SQLITE_URL = "sqlite:///:memory:"
 # Set PG_TEST_URL to run the dual-engine suite. Without it those tests skip

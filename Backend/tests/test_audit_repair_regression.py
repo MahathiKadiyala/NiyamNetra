@@ -250,9 +250,38 @@ def test_repeated_assess_idempotency_and_force(env):
     assert len(d3["findings"]) == 19
 
 
-def test_recapture_invalidates_assessment_cache(env):
+def test_recapture_invalidates_assessment_cache(env, monkeypatch):
     """Requirement 6: Uploading a new panel image clears the cache fingerprint."""
     eng, db, inspector, store, client = env
+
+    from ocr_engine import OcrLine, OcrResult, STATUS_SUCCESS
+    import ocr_engine
+
+    def mock_run_ocr(*args, **kwargs):
+        panel = kwargs.get("panel", "front")
+        return OcrResult(
+            lines=[
+                OcrLine(
+                    text="Tata Tea Premium 250g",
+                    confidence=0.98,
+                    box=[[10, 10], [100, 10], [100, 30], [10, 30]],
+                    height_px=15.0,
+                ),
+                OcrLine(
+                    text="MRP Rs 140.00 (incl. of all taxes)",
+                    confidence=0.97,
+                    box=[[10, 40], [150, 40], [150, 60], [10, 60]],
+                    height_px=14.0,
+                ),
+            ],
+            engine="mock_cloud_ocr",
+            mean_confidence=0.975,
+            status=STATUS_SUCCESS,
+            panel=panel,
+        )
+
+    monkeypatch.setattr(ocr_engine, "run_ocr", mock_run_ocr)
+    monkeypatch.setattr("image_processor.process_image_similarity_background", lambda *a, **kw: None)
 
     insp = Inspection(
         user_id=inspector.id,

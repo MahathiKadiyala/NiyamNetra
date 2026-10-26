@@ -618,14 +618,86 @@ def test_ocr_and_llm_failure_diagnostics(env, caplog):
     assert data["overall_result"] == "not_assessed"
 
 
-def test_identical_assessment_reuse_and_concurrency_protection(env, caplog):
+def test_identical_assessment_reuse_and_concurrency_protection(env, caplog, monkeypatch):
     """Part G Tests 6 & 7:
     - Verifies identical assessment input reuses persisted assessment without duplicate OCR/LLM
     - Verifies concurrent requests for the same scan are safely handled
+    - Verifies failed / not_assessed scans are never cached or reused
     """
     import logging
     import threading
     eng, db, inspector, store, client = env
+
+    from ocr_engine import OcrLine, OcrResult, STATUS_SUCCESS
+    import ocr_engine
+
+    def mock_run_ocr(*args, **kwargs):
+        panel = kwargs.get("panel", "front")
+        return OcrResult(
+            lines=[
+                OcrLine(text="Borges Extra Virgin Olive Oil", confidence=0.99, height_px=16.0),
+                OcrLine(text="Commodity: Olive Oil", confidence=0.99, height_px=14.0),
+                OcrLine(text="Net Quantity: 1 l", confidence=0.99, height_px=14.0),
+                OcrLine(text="MRP Rs 1200.00 incl. of all taxes", confidence=0.99, height_px=14.0),
+                OcrLine(text="Month and Year of Mfg: 01/2026", confidence=0.99, height_px=12.0),
+                OcrLine(text="Best Before: 24 months", confidence=0.99, height_px=12.0),
+                OcrLine(text="Country of Origin: Spain", confidence=0.99, height_px=12.0),
+                OcrLine(text="Consumer Care: 1800111222", confidence=0.99, height_px=12.0),
+                OcrLine(text="Manufactured by: Borges SA Spain", confidence=0.99, height_px=12.0),
+                OcrLine(text="Batch No: B-991", confidence=0.99, height_px=12.0),
+            ],
+            engine="mock_cloud_ocr",
+            mean_confidence=0.99,
+            status=STATUS_SUCCESS,
+            panel=panel,
+        )
+
+    monkeypatch.setattr(ocr_engine, "run_ocr", mock_run_ocr)
+
+    from unittest.mock import MagicMock
+    from llm.prompts import PROMPT_VERSION, SCHEMA_VERSION
+    from llm.schema import (
+        CommonFieldDeclaration,
+        ConsumerCareDeclaration,
+        DateDeclaration,
+        FieldProvenance,
+        LLM_STATUS_SUCCESS,
+        MrpDeclaration,
+        NetQuantityDeclaration,
+        PartyDeclaration,
+        STATUS_CONFIRMED,
+        StructuredDeclarationResult,
+    )
+
+    expected_provider = getattr(settings, "LLM_PROVIDER", "groq")
+    expected_model = (
+        getattr(settings, "GEMINI_MODEL", "")
+        if expected_provider in ("gemini", "google_gemini", "gemini-flash")
+        else getattr(settings, "GROQ_MODEL", "llama-3.3-70b-versatile")
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.name = expected_provider
+    mock_llm.model_name = expected_model
+
+    def _extract_declarations(pkg, meta=None):
+        return StructuredDeclarationResult(
+            metadata={
+                "status": LLM_STATUS_SUCCESS,
+                "llm_prompt_version": PROMPT_VERSION,
+                "llm_schema_version": SCHEMA_VERSION,
+                "llm_provider": expected_provider,
+                "llm_model": expected_model,
+            },
+            raw_packaged_ocr=pkg,
+            net_quantity=NetQuantityDeclaration(status="confirmed", value=1.0, unit="l"),
+            mrp=MrpDeclaration(status="confirmed", value=1200.0, currency="INR"),
+        )
+
+    mock_llm.extract_declarations.side_effect = _extract_declarations
+
+    monkeypatch.setattr("llm.factory.get_llm_provider", lambda *a, **kw: mock_llm)
+    monkeypatch.setattr("llm.get_llm_provider", lambda *a, **kw: mock_llm)
 
     insp = Inspection(
         user_id=inspector.id,
@@ -647,7 +719,10 @@ def test_identical_assessment_reuse_and_concurrency_protection(env, caplog):
         engine_version="2.4.0",
         net_quantity_value=1.0,
         net_quantity_unit="l",
+        panel_shape="rectangular",
         panel_height_mm=220.0,
+        panel_width_mm=100.0,
+        scale_source="declared",
     )
     db.add(scan)
     db.commit()
@@ -671,6 +746,7 @@ def test_identical_assessment_reuse_and_concurrency_protection(env, caplog):
     res1 = client.post(f"/scans/{scan.id}/assess")
     assert res1.status_code == 200
     data1 = res1.json()
+    assert data1["overall_result"] != "not_assessed"
 
     # Call 2: Identical repeated request -> must hit idempotent fast reuse
     with caplog.at_level(logging.INFO):
@@ -701,6 +777,49 @@ def test_identical_assessment_reuse_and_concurrency_protection(env, caplog):
 
     assert res3.status_code == 200
     assert "concurrent_assessment_detected" in caplog.text or "concurrent_duplicate_reused" in caplog.text
+
+    # Call 4: Failure safety invariant — not_assessed/failed assessments are never reused
+    scan_fail = Scan(
+        inspection_id=insp.id,
+        commodity_generic="Unknown Commodity",
+        overall_result="not_assessed",
+        rules_as_at=date(2026, 9, 25),
+        catalog_hash="hash_fail_safe",
+        engine_version="2.4.0",
+    )
+    db.add(scan_fail)
+    db.commit()
+
+    def mock_fail_ocr(*args, **kwargs):
+        return OcrResult(lines=[], engine="none", status="unavailable", failure_reason="Provider unavailable")
+
+    monkeypatch.setattr(ocr_engine, "run_ocr", mock_fail_ocr)
+    p_unusable = _make_dummy_image_file("unusable_front")
+    img_fail = ScanImage(
+        scan_id=scan_fail.id,
+        panel="front",
+        sequence=0,
+        file_path=p_unusable,
+        byte_size=os.path.getsize(p_unusable),
+        width_px=800,
+        height_px=1000,
+        mime_type="image/jpeg",
+        sha256="sha256_unusable_front",
+    )
+    db.add(img_fail)
+    db.commit()
+
+    caplog.clear()
+    res_f1 = client.post(f"/scans/{scan_fail.id}/assess")
+    assert res_f1.status_code == 200
+    assert res_f1.json()["overall_result"] == "not_assessed"
+    db.refresh(scan_fail)
+    assert scan_fail.ocr_cache_hash is None
+
+    caplog.clear()
+    res_f2 = client.post(f"/scans/{scan_fail.id}/assess")
+    assert res_f2.status_code == 200
+    assert "idempotent_assessment_reused" not in caplog.text
 
 
 def test_new_image_and_recapture_invalidation(env):
