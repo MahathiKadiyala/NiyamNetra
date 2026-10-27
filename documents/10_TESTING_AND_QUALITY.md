@@ -166,7 +166,7 @@ Assertions Summary: 254 passed, 0 failed, 0 skipped (total 254 assertions)
 ## 5. Physical Hardware Verification & Operational Boundaries
 
 ### 5.1 Packaging & Compatibility Baseline
-The release APK packaging (`NiyamNetra-v1.0.4-release.apk`) has been configured and validated for Android compatibility:
+The release APK packaging (`release/NiyamNetra-v1.0.5-release-candidate.apk`, version `1.0.5`, versionCode `6`) has been configured and validated for Android compatibility:
 - **Hardware Architecture:** ARM64 (`arm64-v8a`) and ARMv7 (`armeabi-v7a`).
 - **Android Version Coverage:** Android 7.0 (API Level 24) through Android 16 (API Level 36).
 - **16 KB Memory Page-Size Compatibility:** Verified using Android 15 page-size alignment tooling (`zipalign -c -P 16 -v 4`).

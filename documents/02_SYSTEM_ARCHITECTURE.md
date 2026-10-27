@@ -142,7 +142,7 @@ NiyamNetra is engineered around a strict separation of concerns designed to elim
 ### 3.1 Client Tier (Tier 1)
 
 #### 1. Inspector Field Mobile App (`Frontend_App`)
-- **Framework:** React Native with Expo SDK 54, packaged as a standalone Android release APK (`NiyamNetra-v1.0.4-release.apk`).
+- **Framework:** React Native with Expo SDK 54, packaged as a standalone Android release APK (`release/NiyamNetra-v1.0.5-release-candidate.apk`, version 1.0.5, versionCode 6).
 - **Target OS:** Android 7.0 (API 24) through Android 16 (API 36); fully aligned for Android 15 16 KB memory page sizes.
 - **Hardware Integration:** Direct `expo-camera` access (no gallery picker to eliminate pre-staged photo fraud), `expo-location` for store geofencing, `expo-secure-store` for cryptographic token storage.
 - **Client Processing:** Performs instant heuristic quality analysis (blur, glare, luma histogram) and generates the derived analysis JPEG prior to transmission.

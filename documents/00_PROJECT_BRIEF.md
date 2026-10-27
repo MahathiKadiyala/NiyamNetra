@@ -5,7 +5,7 @@
 **Title:** Software System to check compliance of Packaged Commodities under Legal Metrology (Packaged Commodities) Rules, 2011 by scanning products, images and labels  
 **Organization:** Ministry of Consumer Affairs, Food & Public Distribution  
 **Department:** Department of Consumer Affairs (Legal Metrology Division)  
-**Current Release Status:** `RELEASE_READY` (v1.0.4, Build Code 5)  
+**Current Release Status:** `RELEASE_READY` (v1.0.5, Build Code 6)
 
 ---
 
@@ -87,10 +87,10 @@ Pre-packaged goods across India are governed by Chapter II of the Legal Metrolog
 | **Registered Statutory Rules** | 26 registered rules: 19 executable checks and 7 manual-review/advisory checks |
 | **Backend Test Suite** | **598 automated tests collected** across 48 test modules (`pytest --collect-only -q`); Module 11 targeted regression suite verified **145 passed, 0 failed, 0 skipped**; recorded release baseline verified **428 passed, 0 failed** |
 | **Frontend Test Suite** | **254 assertions passed, 0 failed** across all 9 test suites (`node run_all_tests.js` in `Frontend_App`) |
-| **Release APK Version** | v1.0.4 (VersionCode: 5) |
-| **Release APK File** | `release/NiyamNetra-v1.0.4-release.apk` |
-| **APK SHA-256 Digest** | `DB6897E8FB05CA062C3E44839C9605B998F0FD533481F9F8F62C3D141BF366BA` |
-| **Signing Cert Fingerprint** | `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c` |
+| **Release APK Version** | v1.0.5 (VersionCode: 6) |
+| **Release APK File** | `release/NiyamNetra-v1.0.5-release-candidate.apk` *(legacy v1.0.4 preserved at `release/NiyamNetra-v1.0.4-release.apk`)* |
+| **APK SHA-256 Digest** | `200ca71c06125186e6b9de95835628b4d1d3444caa254eefa5c08b61f6866284` |
+| **Signing Cert Fingerprint** | `58:70:3E:96:A4:26:4B:DE:24:35:85:E1:36:B3:BA:18:9E:95:7C:51:A3:A1:97:7B:04:15:7B:81:BE:40:9A:27` *(official EAS release key)* |
 
 ---
 

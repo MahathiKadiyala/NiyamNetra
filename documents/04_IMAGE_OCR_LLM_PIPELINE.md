@@ -242,7 +242,7 @@ Every extracted entity carries an explicit `FieldProvenance` record:
 ## 6. Security & Credential Isolation
 
 To prevent credential leakage:
-1. **Zero Client-Side AI Keys:** The mobile app bundle (`NiyamNetra-v1.0.4-release.apk`) contains zero OCR API keys, Groq tokens, or Gemini credentials. All AI calls execute strictly server-side within the protected Render backend environment.
+1. **Zero Client-Side AI Keys:** The mobile app bundle (`release/NiyamNetra-v1.0.5-release-candidate.apk`) contains zero OCR API keys, Groq tokens, or Gemini credentials. All AI calls execute strictly server-side within the protected Render backend environment.
 2. **SSRF-Guarded Outbound Fetching:** When evaluating e-commerce product links (Rules 6(10) & 6(10A)), the backend resolves DNS names through an IP-validation sandbox, blocking private IP ranges (`10.0.0.0/8`, `127.0.0.0/8`, `169.254.169.254`) and preventing Server-Side Request Forgery.
 
 ---

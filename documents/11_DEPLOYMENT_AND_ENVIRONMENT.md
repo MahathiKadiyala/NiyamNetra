@@ -38,7 +38,7 @@ NiyamNetra is deployed across high-availability cloud infrastructure designed fo
 | **Database** | PostgreSQL 15+ | Supabase (AWS Frankfurt/Mumbai) | Port `5432` (Session Pooler) |
 | **Object Storage** | S3-Compatible Storage | Supabase Storage | Bucket: `NiyamNetra_Images` |
 | **Web Portal** | React 18 + Vite 5 + Tailwind | Vercel (Edge CDN) | `https://niyamnetra-legal-metrology-rules.vercel.app` |
-| **Mobile Client** | React Native (Expo SDK 54) | Standalone Android APK | `release/NiyamNetra-v1.0.4-release.apk` |
+| **Mobile Client** | React Native (Expo SDK 54) | Standalone Android APK | `release/NiyamNetra-v1.0.5-release-candidate.apk` (v1.0.5, Build 6) |
 
 ---
 
@@ -128,7 +128,7 @@ cd Frontend_App
 # Compile production standalone APK using Expo Application Services (EAS)
 eas build --platform android --profile release --local
 ```
-Output artifact: `release/NiyamNetra-v1.0.4-release.apk`.
+Output artifact: `release/NiyamNetra-v1.0.5-release-candidate.apk` (v1.0.5, versionCode 6; legacy debug v1.0.4 preserved at `release/NiyamNetra-v1.0.4-release.apk`).
 
 ---
 

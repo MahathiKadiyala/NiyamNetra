@@ -112,7 +112,7 @@ To guarantee tamper-evident integrity from camera shutter to final PDF docket:
 To prevent credential leaks in decompiled mobile packages:
 
 1. **Client Zero-Secret Verification:**
-   - The production APK (`NiyamNetra-v1.0.4-release.apk`) contains **zero** Google Cloud Vision keys, Groq tokens, Gemini credentials, Supabase service keys, or JWT signing secrets.
+   - The production APK (`release/NiyamNetra-v1.0.5-release-candidate.apk`) contains **zero** Google Cloud Vision keys, Groq tokens, Gemini credentials, Supabase service keys, or JWT signing secrets.
    - All external AI and database operations execute exclusively within the server-side FastAPI environment.
 2. **Server-Side Configuration Enforcement:**
    - Backend `config.py` uses `pydantic-settings` configured with `extra="ignore"` (rather than `"forbid"`). This intentional configuration prevents application startup crashes from cloud platform-injected environment variables (such as `PORT`, `RENDER`, and `RENDER_INSTANCE_ID` on Render), while strictly validating all required secrets, types, and constraints.

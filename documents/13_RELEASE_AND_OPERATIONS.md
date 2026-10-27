@@ -1,8 +1,8 @@
 # Release Operations & Production Runbook
 
-**Document Code:** `DOC-13`  
-**Current Production Release:** v1.0.4 (Build Code 5)  
-**Release Status:** `RELEASE_READY`  
+**Document Code:** `DOC-13`<br/>
+**Current Production Release:** v1.0.5 (Build Code 6)<br/>
+**Release Status:** `RELEASE_READY`<br/>
 **Verification Date:** October 2026  
 
 ---
@@ -12,12 +12,12 @@
 | Parameter | Authoritative Value |
 |---|---|
 | **Package ID** | `com.niyamnetra.app` |
-| **Version Name** | `1.0.4` |
-| **Version Code** | `5` |
+| **Version Name** | `1.0.5` |
+| **Version Code** | `6` |
 | **Signing Scheme** | APK Signature Scheme v2 |
-| **Signing Certificate Fingerprint (SHA-256)** | `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c` |
-| **Release APK File Path** | `release/NiyamNetra-v1.0.4-release.apk` |
-| **Release APK SHA-256 Digest** | `DB6897E8FB05CA062C3E44839C9605B998F0FD533481F9F8F62C3D141BF366BA` |
+| **Signing Certificate Fingerprint (SHA-256)** | `58:70:3E:96:A4:26:4B:DE:24:35:85:E1:36:B3:BA:18:9E:95:7C:51:A3:A1:97:7B:04:15:7B:81:BE:40:9A:27` (official EAS release keystore; legacy debug v1.0.4: `fac61745...`) |
+| **Release APK File Path** | `release/NiyamNetra-v1.0.5-release-candidate.apk` |
+| **Release APK SHA-256 Digest** | `200ca71c06125186e6b9de95835628b4d1d3444caa254eefa5c08b61f6866284` |
 | **Android Memory Page-Size Alignment** | 16 KB Page-Size Aligned (`zipalign -c -P 16 -v 4` verified) |
 | **Minimum SDK** | Android 7.0 (API Level 24) |
 | **Target SDK** | Android 16 (API Level 36) |
@@ -89,7 +89,7 @@ Every production release must satisfy all seven mandatory release gates:
   - Frontend Mobile App: **254 assertions passed, 0 failed** across all 9 suites (`node run_all_tests.js` in `Frontend_App`).
 - [x] **Gate 3 — Live Production Smoke Test:** Automated 12-step smoke test passing against live Render backend.
 - [x] **Gate 4 — APK Production Configuration Audit:** Direct bytecode inspection confirms zero localhost URLs, zero LAN IPs, and zero exposed API keys or secrets.
-- [x] **Gate 5 — APK Identity & Signature Integrity:** Stable package ID `com.niyamnetra.app`, version `1.0.4`, versionCode `5`, cert fingerprint `fac61745...`, 16 KB page-size alignment verified.
+- [x] **Gate 5 — APK Identity & Signature Integrity:** Stable package ID `com.niyamnetra.app`, version `1.0.5`, versionCode `6`, cert fingerprint `58:70:3E:96:A4:26:4B:DE:24:35:85:E1:36:B3:BA:18:9E:95:7C:51:A3:A1:97:7B:04:15:7B:81:BE:40:9A:27`, 16 KB page-size alignment verified.
 - [ ] **Gate 6 — Physical Hardware Install & Upgrade Test:** Packaging configuration verified for ARM64/ARMv7, Android 7.0–16, and 16 KB pages. Physical Android handset execution was **not performed** during automated regression due to no connected physical device (`adb devices` empty). Physical device verification is required prior to field deployment.
 - [ ] **Gate 7 — Final Release Verdict:** **`CONDITIONALLY_READY`** (Pending manual OCR.space credential rotation on Render and physical Android device validation).
 
@@ -103,7 +103,7 @@ Every production release must satisfy all seven mandatory release gates:
 adb devices
 
 # Install release APK onto clean device
-adb install -r release/NiyamNetra-v1.0.4-release.apk
+adb install -r release/NiyamNetra-v1.0.5-release-candidate.apk
 
 # Launch NiyamNetra application
 adb shell monkey -p com.niyamnetra.app -c android.intent.category.LAUNCHER 1
@@ -114,8 +114,8 @@ adb shell monkey -p com.niyamnetra.app -c android.intent.category.LAUNCHER 1
 # Verify previous version code
 adb shell dumpsys package com.niyamnetra.app | grep versionCode
 
-# Install updated v1.0.4 APK over existing v1.0.x installation
-adb install -r release/NiyamNetra-v1.0.4-release.apk
+# Install updated v1.0.5 APK over existing v1.0.x installation
+adb install -r release/NiyamNetra-v1.0.5-release-candidate.apk
 ```
 *Verification Invariants:*
 - Existing local SQLite database must remain intact (no schema reset).
@@ -129,8 +129,8 @@ cd Frontend_App
 npx eas build --platform android --profile preview
 ```
 - Both `preview` and `production` profiles in `Frontend_App/eas.json` are configured with `"buildType": "apk"`.
-- `cli.appVersionSource` is set to `remote` with `autoIncrement: true`, guaranteeing that every EAS build produces a strictly higher `versionCode` (e.g. version `1.0.4`, `versionCode 5`), preventing Android version downgrade blocks.
-- Post-install verification: Navigate to **Settings → Apps → NiyamNetra** to confirm version `1.0.4` (`versionCode 5`).
+- `cli.appVersionSource` is set to `remote` with `autoIncrement: true`, guaranteeing that every EAS build produces a strictly higher `versionCode` (e.g. version `1.0.5`, `versionCode 6`), preventing Android version downgrade blocks.
+- Post-install verification: Navigate to **Settings → Apps → NiyamNetra** to confirm version `1.0.5` (`versionCode 6`).
 
 ### 4.4 The Five Root Causes of Android Installation Refusal ("App Not Installed")
 When distributing standalone APKs to field devices, installation refusals stem from five concrete root causes:
@@ -162,16 +162,16 @@ When distributing standalone APKs to field devices, installation refusals stem f
 Prior to releasing an APK to field officers, execute these verification commands using Android SDK build-tools:
 ```bash
 # 1. Verify package identity, SDK levels, and native ABIs
-aapt2 dump badging release/NiyamNetra-v1.0.4-release.apk | grep -E 'package:|sdkVersion|native-code'
-# Expected: package: name='com.niyamnetra.app' versionCode='5' versionName='1.0.4'
+aapt2 dump badging release/NiyamNetra-v1.0.5-release-candidate.apk | grep -E 'package:|sdkVersion|native-code'
+# Expected: package: name='com.niyamnetra.app' versionCode='6' versionName='1.0.5'
 # Expected: sdkVersion:'24', targetSdkVersion:'35', native-code: 'arm64-v8a' 'armeabi-v7a'
 
 # 2. Verify certificate and signature scheme integrity
-apksigner verify --print-certs -v release/NiyamNetra-v1.0.4-release.apk
+apksigner verify --print-certs -v release/NiyamNetra-v1.0.5-release-candidate.apk
 # Expected: Verified using v2 scheme: true, Verification successful
 
 # 3. Verify 16 KB page-size alignment (required for Android 15+)
-zipalign -c -P 16 -v 4 release/NiyamNetra-v1.0.4-release.apk
+zipalign -c -P 16 -v 4 release/NiyamNetra-v1.0.5-release-candidate.apk
 # Expected: Verification successful
 ```
 
@@ -183,10 +183,10 @@ adb shell dumpsys package com.niyamnetra.app | grep -E 'versionCode|signatures'
 
 # If refused with INSTALL_FAILED_UPDATE_INCOMPATIBLE (signature collision):
 adb uninstall com.niyamnetra.app
-adb install -r release/NiyamNetra-v1.0.4-release.apk
+adb install -r release/NiyamNetra-v1.0.5-release-candidate.apk
 
 # If refused with INSTALL_FAILED_VERSION_DOWNGRADE:
-adb install -r -d release/NiyamNetra-v1.0.4-release.apk
+adb install -r -d release/NiyamNetra-v1.0.5-release-candidate.apk
 ```
 
 
@@ -266,7 +266,7 @@ Before cutting a public production release or deploying to enforcement field off
 | **M-06** | **Inspection Submission & Idempotency** | Submit inspection via `POST /inspections/{id}/submit`. Verify status transitions to `submitted`. Re-send submission payload; verify server returns cached submission without duplicate database records. | Automated Verified (`test_e2e_inspection_workflow_regression.py`) |
 | **M-07** | **Review Queue Adjudication** | Open Portal review queue. Verify unconfirmed violation appears under correct classification (`unconfirmed_violation`). Adjudicate violation via `POST /review/inspections/{id}/adjudicate`. Verify audit log recorded. | Automated Verified (`test_e2e_inspection_workflow_regression.py`) |
 | **M-08** | **Render Credential Rotation** | Authorized administrator logs into Render Dashboard, updates `OCR_SPACE_API_KEY` with freshly issued key, and verifies previous exposed key is revoked. | **Pending Administrator Confirmation** |
-| **M-09** | **Production APK Signing** | Build release APK using production keystore via EAS (`eas build --platform android --profile release --local`) or local build with `NN_RELEASE_*`. Note: legacy staged APK v1.0.4 carried debug fingerprint `fac61745...`; production builds must use the official production release certificate. | Packaging Configured / Production Build Pending |
+| **M-09** | **Production APK Signing** | Build release APK using production keystore via EAS or local build with `NN_RELEASE_*`. Note: legacy staged APK v1.0.4 carried debug fingerprint `fac61745...`; production release candidate v1.0.5 is signed with the official production certificate `58:70:3E:...`. | Verified (EAS Build `2553f293`, v1.0.5, versionCode 6) |
 | **M-10** | **Physical Android Handset Install** | Connect physical Android handset via ADB (`adb devices`). Install release APK. Verify camera autofocus, auto-exposure, and torch flash operate reliably on packaging in low light. | **Pending Connected Physical Device** |
 | **M-11** | **Physical In-Place Upgrade** | Install release APK over an existing v1.0.x installation with local offline SQLite data. Confirm app starts, session remains valid, and offline draft records are preserved. | **Pending Connected Physical Device** |
 

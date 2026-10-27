@@ -5,7 +5,7 @@
 
 [![Backend API](https://img.shields.io/badge/Backend-FastAPI_0.110-009688?logo=fastapi)](https://niyamnetra-backend.onrender.com)
 [![Web Portal](https://img.shields.io/badge/Web_Portal-Vercel_SPA-black?logo=vercel)](https://niyamnetra-legal-metrology-rules.vercel.app)
-[![Release APK](https://img.shields.io/badge/Release_APK-v1.0.4_(Build_5)-success?logo=android)](release/NiyamNetra-v1.0.4-release.apk)
+[![Release APK](https://img.shields.io/badge/Release_APK-v1.0.5_(Build_6)-success?logo=android)](release/NiyamNetra-v1.0.5-release-candidate.apk)
 [![Rules Pack](https://img.shields.io/badge/Statutory_Pack-2026.09.v1_(26_Rules)-blue)](documents/05_LEGAL_COMPLIANCE_ENGINE.md)
 [![Backend Tests](https://img.shields.io/badge/Backend_Tests-598_Collected-009688)](documents/10_TESTING_AND_QUALITY.md)
 [![Frontend Tests](https://img.shields.io/badge/Frontend_Tests-254_Passed_(9_Suites)-brightgreen)](documents/10_TESTING_AND_QUALITY.md)
@@ -266,13 +266,13 @@ npx expo start                        # Scan QR with Expo Go
 
 | Parameter | Authoritative Release Specification |
 |---|---|
-| **Release Artifact** | [`release/NiyamNetra-v1.0.4-release.apk`](release/NiyamNetra-v1.0.4-release.apk) |
+| **Release Artifact** | [`release/NiyamNetra-v1.0.5-release-candidate.apk`](release/NiyamNetra-v1.0.5-release-candidate.apk) *(legacy v1.0.4 preserved at `release/NiyamNetra-v1.0.4-release.apk`)* |
 | **Package Name** | `com.niyamnetra.app` |
-| **Version Name / Code** | `1.0.4` / Build `5` |
+| **Version Name / Code** | `1.0.5` / Build `6` |
 | **Signing Scheme** | APK Signature Scheme v2 |
-| **Certificate Fingerprint** | `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c` |
-| **APK SHA-256 Digest** | `DB6897E8FB05CA062C3E44839C9605B998F0FD533481F9F8F62C3D141BF366BA` |
-| **Page-Size Alignment** | Android 15 16 KB Page-Size Aligned (`zipalign` verified) |
+| **Certificate Fingerprint** | `58:70:3E:96:A4:26:4B:DE:24:35:85:E1:36:B3:BA:18:9E:95:7C:51:A3:A1:97:7B:04:15:7B:81:BE:40:9A:27` *(official EAS release key)* |
+| **APK SHA-256 Digest** | `200ca71c06125186e6b9de95835628b4d1d3444caa254eefa5c08b61f6866284` |
+| **Page-Size Alignment** | Android 15 16 KB Page-Size Aligned (`zipalign -P 16` verified) |
 
 ---
 
