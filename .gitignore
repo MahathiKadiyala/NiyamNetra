@@ -62,7 +62,6 @@ ios/
 *.keystore
 *.mobileprovision
 *.apk
-release/
 
 # logs and OS cruft
 *.log
